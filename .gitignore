@@ -9,4 +9,5 @@ runs/
 pe_sections.bin
 tools/remill-src/
 tools/oat-src/
+tools/gsc-tool-src/
 runtime/win32/snd_reverb_gen.inc

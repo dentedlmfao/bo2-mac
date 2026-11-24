@@ -33737,6 +33737,95 @@ extern "C" __attribute__((used)) void* bo2_libm_atan2(State* s, uint32_t pc, voi
     return mem;
 }
 
+// MSVC CRT _controlfp_s replacement for ARM64 macOS.
+// The lifted x86 CRT compares hardware MXCSR bits which ARM64 does not support natively,
+// failing with 0x80000000 and aborting via _invoke_watson.
+// Sets return value 0 (success), optionally writes default x86 control word 0x8001f to *pcurrentval,
+// and pops the return address (cdecl).
+extern "C" __attribute__((used)) void* bo2_controlfp_s(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    const uint32_t esp = s->gpr.rsp.dword;
+    const uint32_t pcurrent = win32_mem_read32(esp + 4);
+    if (pcurrent) {
+        win32_mem_write32(pcurrent, 0x0008001f);
+    }
+    s->gpr.rax.dword = 0;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// Stub for CRT floating-point environment initialization thunk (takes 0 args, cdecl, returns void).
+extern "C" __attribute__((used)) void* bo2_fpenv_noop(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    s->gpr.rax.dword = 0;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// Stub for CRT invalid parameter handler (takes 0 args, cdecl, returns void).
+// Allows CRT functions to return standard error codes (EINVAL, _NLSCMPERROR) instead of terminating via Watson.
+extern "C" __attribute__((used)) void* bo2_invalid_parameter_noop(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// Implementation of CRT _strnicmp_l (0xa79f5a)
+// cdecl: (const char *s1, const char *s2, size_t count, void *locale)
+extern "C" __attribute__((used)) void* bo2_strnicmp_l(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    const uint32_t esp = s->gpr.rsp.dword;
+    const uint32_t s1_va = win32_mem_read32(esp + 4);
+    const uint32_t s2_va = win32_mem_read32(esp + 8);
+    const uint32_t count = win32_mem_read32(esp + 12);
+    // esp + 16 is locale pointer, unused for ASCII
+
+    if (!count) {
+        s->gpr.rax.dword = 0;
+        s->gpr.rsp.dword += 4;
+        return mem;
+    }
+
+    if (!s1_va || !s2_va) {
+        s->gpr.rax.dword = 0x7fffffff;
+        s->gpr.rsp.dword += 4;
+        return mem;
+    }
+
+    int res = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint8_t c1 = win32_mem_read8(s1_va + i);
+        uint8_t c2 = win32_mem_read8(s2_va + i);
+        uint8_t lc1 = (c1 >= 'A' && c1 <= 'Z') ? (c1 + 32) : c1;
+        uint8_t lc2 = (c2 >= 'A' && c2 <= 'Z') ? (c2 + 32) : c2;
+        if (lc1 != lc2) {
+            res = (int)lc1 - (int)lc2;
+            break;
+        }
+        if (c1 == 0) break;
+    }
+
+    s->gpr.rax.dword = (uint32_t)res;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// CRT unlock thunks (0xa7a826, 0xa7abd9, 0xa7abe5): cdecl, 0 args, returns void.
+extern "C" __attribute__((used)) void* bo2_crt_unlock_noop(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// STL locale facet init thunk (0x9ae590): cdecl, 3 args, returns void.
+// Prevents dummy _CxxThrowException probe during engine startup.
+extern "C" __attribute__((used)) void* bo2_locale_facet_noop(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    s->gpr.rax.dword = 0;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
 // --- Client side of the same path (RE'd from CL_ReadPackets FUN_008093a0).
 // CL_PacketEvent = FUN_0045dfa0: OOB -> FUN_00466500 (which tokenizes and calls
 // the connstate machine FUN_007752c0); else it needs clcState >= 6 (CONNECTED),

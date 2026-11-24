@@ -15,7 +15,15 @@
 
 #include <CommonCrypto/CommonCryptor.h>
 #include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <zlib.h>
 
 #include <cstdio>
@@ -65,6 +73,10 @@ constexpr uint32_t NET = 0x0A4D0000u, LOCAL_IP = 0x0A4D0102u;
 
 struct Sock {
     int type = SOCK_STREAM_;
+    int host_fd = -1;                                        // Real Darwin POSIX socket descriptor
+    bool is_real_udp = false;
+    uint32_t bound_ip = 0;                                   // host byte order
+    uint16_t bound_port = 0;                                 // host byte order
     bool connected = false;
     uint32_t peer_ip = 0; uint16_t peer_port = 0;            // host byte order
     std::deque<uint8_t> rx;                                  // TCP: bytes the responder sent
@@ -79,7 +91,9 @@ std::map<std::string, uint32_t> g_hostent;                   // name -> guest ho
 
 std::string name_of(uint32_t ip) {
     for (auto& kv : g_name_ip) if (kv.second == ip) return kv.first;
-    return "?";
+    char buf[32];
+    snprintf(buf, sizeof buf, "%u.%u.%u.%u", ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255);
+    return buf;
 }
 
 void server_on_data(uint32_t s, Sock& k);                   // the responder (below)
@@ -108,8 +122,31 @@ uint32_t fail(uint32_t err) { g_last_error = err; return SOCKET_ERROR_; }
 void impl_wsock_ordinal_23(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
     uint32_t s = g_next_sock++;
-    g_socks[s].type = (int)win32_arg(st, 1);
-    if (g_trace) fprintf(stderr, "[DWP] socket type=%d -> %u\n", g_socks[s].type, s);
+    int af = (int)win32_arg(st, 0);
+    int type = (int)win32_arg(st, 1);
+    int protocol = (int)win32_arg(st, 2);
+    Sock& k = g_socks[s];
+    k.type = type;
+    if (type == SOCK_DGRAM_) {
+        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd >= 0) {
+            int flags = fcntl(fd, F_GETFL, 0);
+            if (flags >= 0) {
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+            }
+            int bcast = 1;
+            setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &bcast, sizeof(bcast));
+            int reuse = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+            // Note: SO_REUSEPORT intentionally NOT set so concurrent instances on same machine
+            // fail with EADDRINUSE and trigger fallback port rather than hijacking packets.
+            k.host_fd = fd;
+            k.is_real_udp = true;
+        } else {
+            if (g_trace) fprintf(stderr, "[DWP] socket(SOCK_DGRAM) host socket() error: %s\n", strerror(errno));
+        }
+    }
+    if (g_trace) fprintf(stderr, "[DWP] socket type=%d -> guest=%u host_fd=%d\n", k.type, s, k.host_fd);
     st.gpr.rax.dword = s;
     win32_stdcall_ret(st, 3);
 }
@@ -118,24 +155,192 @@ void impl_wsock_ordinal_23(State& st) {
 void impl_wsock_ordinal_3(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
     uint32_t s = win32_arg(st, 0);
-    st.gpr.rax.dword = g_socks.erase(s) ? 0 : fail(WSAENOTSOCK_);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+    } else {
+        if (it->second.host_fd >= 0) {
+            ::close(it->second.host_fd);
+            it->second.host_fd = -1;
+        }
+        g_socks.erase(it);
+        st.gpr.rax.dword = 0;
+    }
     if (g_trace) fprintf(stderr, "[DWP] closesocket %u\n", s);
     win32_stdcall_ret(st, 1);
 }
 
-// bind(s, name, namelen): any local address is accepted.
-void impl_wsock_ordinal_2(State& st) { st.gpr.rax.dword = 0; win32_stdcall_ret(st, 3); }
+// bind(s, name, namelen)
+void impl_wsock_ordinal_2(State& st) {
+    std::lock_guard<std::mutex> l(g_mu);
+    uint32_t s = win32_arg(st, 0), sa = win32_arg(st, 1), namelen = win32_arg(st, 2);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+    if (!sa || namelen < 8) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+
+    uint16_t req_port = (uint16_t)(win32_mem_read8(sa + 2) << 8 | win32_mem_read8(sa + 3));
+    uint32_t req_ip = (uint32_t)win32_mem_read8(sa + 4) << 24 | win32_mem_read8(sa + 5) << 16 |
+                      win32_mem_read8(sa + 6) << 8 | win32_mem_read8(sa + 7);
+
+    // Optional override via BO2_PORT
+    const char* port_env = bo2_getenv("BO2_PORT");
+    if (port_env && *port_env) {
+        int p = atoi(port_env);
+        if (p > 0 && p < 65536) req_port = (uint16_t)p;
+    }
+
+    if (it->second.host_fd >= 0) {
+        struct sockaddr_in host_sin{};
+#ifdef __APPLE__
+        host_sin.sin_len = sizeof(host_sin);
+#endif
+        host_sin.sin_family = AF_INET;
+        host_sin.sin_port = htons(req_port);
+        host_sin.sin_addr.s_addr = (req_ip == 0 || (req_ip & 0xFFFF0000u) == NET) ? htonl(INADDR_ANY) : htonl(req_ip);
+
+        int rc = ::bind(it->second.host_fd, (struct sockaddr*)&host_sin, sizeof(host_sin));
+        if (rc != 0 && errno == EADDRNOTAVAIL) {
+            host_sin.sin_addr.s_addr = htonl(INADDR_ANY);
+            rc = ::bind(it->second.host_fd, (struct sockaddr*)&host_sin, sizeof(host_sin));
+        }
+        if (rc != 0 && (errno == EADDRINUSE || errno == EACCES)) {
+            if (g_trace) {
+                fprintf(stderr, "[DWP] bind s=%u port %u in use (%s), attempting fallback...\n",
+                        s, req_port, strerror(errno));
+            }
+            bool bound = false;
+            // Fallback 1: try req_port + 1 (e.g. 3075 if 3074 was in use)
+            if (req_port > 0 && req_port < 65535) {
+                host_sin.sin_port = htons(req_port + 1);
+                if (::bind(it->second.host_fd, (struct sockaddr*)&host_sin, sizeof(host_sin)) == 0) {
+                    bound = true;
+                }
+            }
+            // Fallback 2: ephemeral port (port 0)
+            if (!bound) {
+                host_sin.sin_port = 0;
+                if (::bind(it->second.host_fd, (struct sockaddr*)&host_sin, sizeof(host_sin)) == 0) {
+                    bound = true;
+                }
+            }
+        }
+
+        socklen_t slen = sizeof(host_sin);
+        if (::getsockname(it->second.host_fd, (struct sockaddr*)&host_sin, &slen) == 0 && host_sin.sin_port != 0) {
+            it->second.bound_port = ntohs(host_sin.sin_port);
+            it->second.bound_ip = ntohl(host_sin.sin_addr.s_addr);
+        } else {
+            st.gpr.rax.dword = fail(10048 /* WSAEADDRINUSE */);
+            win32_stdcall_ret(st, 3);
+            return;
+        }
+    } else {
+        it->second.bound_port = req_port;
+        it->second.bound_ip = req_ip;
+    }
+
+    if (g_trace) {
+        fprintf(stderr, "[DWP] bind s=%u req_port=%u -> bound_port=%u host_fd=%d\n",
+                s, req_port, it->second.bound_port, it->second.host_fd);
+    }
+    st.gpr.rax.dword = 0;
+    win32_stdcall_ret(st, 3);
+}
+
+// getsockname(s, name, namelen) (WS2_32 ordinal 6 / WSOCK32 ordinal 6)
+void impl_ws2_ordinal_6(State& st) {
+    std::lock_guard<std::mutex> l(g_mu);
+    uint32_t s = win32_arg(st, 0), name = win32_arg(st, 1), namelen_ptr = win32_arg(st, 2);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+    if (!name || !namelen_ptr) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+    uint32_t buflen = win32_mem_read32(namelen_ptr);
+    if (buflen < 16) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+
+    uint16_t port = it->second.bound_port;
+    uint32_t ip = it->second.bound_ip;
+
+    if (it->second.host_fd >= 0) {
+        struct sockaddr_in sin{};
+        socklen_t slen = sizeof(sin);
+        if (::getsockname(it->second.host_fd, (struct sockaddr*)&sin, &slen) == 0) {
+            port = ntohs(sin.sin_port);
+            if (sin.sin_addr.s_addr != 0) {
+                ip = ntohl(sin.sin_addr.s_addr);
+            }
+            it->second.bound_port = port;
+            if (ip) it->second.bound_ip = ip;
+        }
+    }
+
+    uint8_t sa[16] = {0};
+    sa[0] = 2; // AF_INET lo
+    sa[1] = 0; // AF_INET hi
+    sa[2] = (uint8_t)(port >> 8);
+    sa[3] = (uint8_t)(port & 0xFF);
+    sa[4] = (uint8_t)(ip >> 24);
+    sa[5] = (uint8_t)((ip >> 16) & 0xFF);
+    sa[6] = (uint8_t)((ip >> 8) & 0xFF);
+    sa[7] = (uint8_t)(ip & 0xFF);
+    put_bytes(name, sa, 16);
+    win32_mem_write32(namelen_ptr, 16);
+    if (g_trace) {
+        fprintf(stderr, "[DWP] getsockname s=%u -> %u.%u.%u.%u:%u\n",
+                s, ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255, port);
+    }
+    st.gpr.rax.dword = 0;
+    win32_stdcall_ret(st, 3);
+}
 
 // connect(s, name, namelen)
 void impl_wsock_ordinal_4(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
-    uint32_t s = win32_arg(st, 0), sa = win32_arg(st, 1);
+    uint32_t s = win32_arg(st, 0), sa = win32_arg(st, 1), namelen = win32_arg(st, 2);
     auto it = g_socks.find(s);
     if (it == g_socks.end()) { st.gpr.rax.dword = fail(WSAENOTSOCK_); win32_stdcall_ret(st, 3); return; }
+    if (!sa || namelen < 8) { st.gpr.rax.dword = fail(10014 /* WSAEFAULT */); win32_stdcall_ret(st, 3); return; }
     uint16_t port = (uint16_t)(win32_mem_read8(sa + 2) << 8 | win32_mem_read8(sa + 3));
     uint32_t ip = (uint32_t)win32_mem_read8(sa + 4) << 24 | win32_mem_read8(sa + 5) << 16 |
                   win32_mem_read8(sa + 6) << 8 | win32_mem_read8(sa + 7);
     bool ours = (ip & 0xFFFF0000u) == NET && ip != LOCAL_IP;
+
+    if (it->second.type == SOCK_DGRAM_ && (ip & 0xFFFF0000u) != NET) {
+        if (it->second.host_fd >= 0) {
+            struct sockaddr_in dst{};
+#ifdef __APPLE__
+            dst.sin_len = sizeof(dst);
+#endif
+            dst.sin_family = AF_INET;
+            dst.sin_port = htons(port);
+            dst.sin_addr.s_addr = htonl(ip);
+            ::connect(it->second.host_fd, (struct sockaddr*)&dst, sizeof(dst));
+        }
+        it->second.peer_ip = ip; it->second.peer_port = port; it->second.connected = true;
+        st.gpr.rax.dword = 0;
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+
     if (g_trace) fprintf(stderr, "[DWP] connect %u -> %s (%u.%u.%u.%u:%u) %s\n", s, name_of(ip).c_str(), ip >> 24,
                          ip >> 16 & 255, ip >> 8 & 255, ip & 255, port, ours ? "ok" : "refuse");
     if (!ours) { st.gpr.rax.dword = fail(WSAECONNREFUSED_); win32_stdcall_ret(st, 3); return; }
@@ -154,6 +359,17 @@ void impl_wsock_ordinal_19(State& st) {
     std::vector<uint8_t> d(len);
     get_bytes(buf, d.data(), len);
     hexdump("send", s, d.data(), len);
+    if (it->second.host_fd >= 0 && (it->second.peer_ip & 0xFFFF0000u) != NET) {
+        ssize_t sent = ::send(it->second.host_fd, d.data(), len, 0);
+        if (sent < 0) {
+            st.gpr.rax.dword = (errno == EAGAIN || errno == EWOULDBLOCK) ? fail(WSAEWOULDBLOCK_) : fail(10050);
+            win32_stdcall_ret(st, 4);
+            return;
+        }
+        st.gpr.rax.dword = (uint32_t)sent;
+        win32_stdcall_ret(st, 4);
+        return;
+    }
     it->second.in.insert(it->second.in.end(), d.begin(), d.end());
     server_on_data(s, it->second);
     st.gpr.rax.dword = len;
@@ -169,13 +385,29 @@ void impl_wsock_ordinal_16(State& st) {
     auto it = g_socks.find(s);
     if (it == g_socks.end()) { st.gpr.rax.dword = fail(WSAENOTSOCK_); win32_stdcall_ret(st, 4); return; }
     auto& rx = it->second.rx;
-    if (rx.empty()) { st.gpr.rax.dword = fail(WSAEWOULDBLOCK_); win32_stdcall_ret(st, 4); return; }
-    uint32_t n = len < rx.size() ? len : (uint32_t)rx.size();
-    std::vector<uint8_t> d(rx.begin(), rx.begin() + n);
-    rx.erase(rx.begin(), rx.begin() + n);
-    put_bytes(buf, d.data(), n);
-    hexdump("recv", s, d.data(), n);
-    st.gpr.rax.dword = n;
+    if (!rx.empty()) {
+        uint32_t n = len < rx.size() ? len : (uint32_t)rx.size();
+        std::vector<uint8_t> d(rx.begin(), rx.begin() + n);
+        rx.erase(rx.begin(), rx.begin() + n);
+        put_bytes(buf, d.data(), n);
+        hexdump("recv", s, d.data(), n);
+        st.gpr.rax.dword = n;
+        win32_stdcall_ret(st, 4);
+        return;
+    }
+    if (it->second.host_fd >= 0) {
+        uint8_t tmp[4096];
+        ssize_t r = ::recv(it->second.host_fd, tmp, sizeof(tmp), 0);
+        if (r >= 0) {
+            uint32_t n = len < (uint32_t)r ? len : (uint32_t)r;
+            put_bytes(buf, tmp, n);
+            hexdump("recv", s, tmp, (size_t)n);
+            st.gpr.rax.dword = n;
+            win32_stdcall_ret(st, 4);
+            return;
+        }
+    }
+    st.gpr.rax.dword = fail(WSAEWOULDBLOCK_);
     win32_stdcall_ret(st, 4);
 }
 
@@ -206,25 +438,119 @@ void stun(uint32_t s, const uint8_t* d, uint32_t len, uint32_t ip, uint16_t port
     g_socks[s].dgrams.push_back({r, {ip, port}});
 }
 
-// sendto(s, buf, len, flags, to, tolen): only the STUN requests get an answer.
+// sendto(s, buf, len, flags, to, tolen)
 void impl_wsock_ordinal_20(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
-    uint32_t s = win32_arg(st, 0), buf = win32_arg(st, 1), len = win32_arg(st, 2), to = win32_arg(st, 4);
-    if (to && len < 64) {
-        uint8_t d[64];
-        get_bytes(buf, d, len);
-        stun(s, d, len,
-             (uint32_t)win32_mem_read8(to + 4) << 24 | win32_mem_read8(to + 5) << 16 | win32_mem_read8(to + 6) << 8 |
-                 win32_mem_read8(to + 7),
-             (uint16_t)(win32_mem_read8(to + 2) << 8 | win32_mem_read8(to + 3)));
+    uint32_t s = win32_arg(st, 0), buf = win32_arg(st, 1), len = win32_arg(st, 2),
+             to = win32_arg(st, 4), tolen = win32_arg(st, 5);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+        win32_stdcall_ret(st, 6);
+        return;
     }
-    if (g_trace && to) {
+    if (!buf && len > 0) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 6);
+        return;
+    }
+
+    uint16_t dest_port = 0;
+    uint32_t dest_ip = 0;
+    if (to) {
+        if (tolen < 8) {
+            st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+            win32_stdcall_ret(st, 6);
+            return;
+        }
+        dest_port = (uint16_t)(win32_mem_read8(to + 2) << 8 | win32_mem_read8(to + 3));
+        dest_ip = (uint32_t)win32_mem_read8(to + 4) << 24 | win32_mem_read8(to + 5) << 16 |
+                  win32_mem_read8(to + 6) << 8 | win32_mem_read8(to + 7);
+    } else if (it->second.connected) {
+        dest_port = it->second.peer_port;
+        dest_ip = it->second.peer_ip;
+    } else {
+        st.gpr.rax.dword = fail(WSAENOTCONN_);
+        win32_stdcall_ret(st, 6);
+        return;
+    }
+
+    bool is_dw_net = ((dest_ip & 0xFFFF0000u) == NET);
+
+    if (is_dw_net) {
+        if (len < 64) {
+            uint8_t d[64];
+            get_bytes(buf, d, len);
+            stun(s, d, len, dest_ip, dest_port);
+        }
+        if (g_trace) {
+            std::vector<uint8_t> d(len < 64 ? len : 64);
+            get_bytes(buf, d.data(), (uint32_t)d.size());
+            char tag[96];
+            snprintf(tag, sizeof tag, "sendto [DW] %s:%u", name_of(dest_ip).c_str(), dest_port);
+            hexdump(tag, s, d.data(), d.size());
+        }
+        st.gpr.rax.dword = len;
+        win32_stdcall_ret(st, 6);
+        return;
+    }
+
+    // Real UDP send over POSIX socket
+    if (it->second.host_fd >= 0) {
+        std::vector<uint8_t> d(len);
+        if (len > 0) get_bytes(buf, d.data(), len);
+
+        ssize_t sent = -1;
+        if (to == 0 || (it->second.connected && dest_ip == it->second.peer_ip && dest_port == it->second.peer_port)) {
+            sent = ::send(it->second.host_fd, d.data(), len, 0);
+        } else {
+            struct sockaddr_in dst{};
+#ifdef __APPLE__
+            dst.sin_len = sizeof(dst);
+#endif
+            dst.sin_family = AF_INET;
+            dst.sin_port = htons(dest_port);
+            dst.sin_addr.s_addr = htonl(dest_ip);
+
+            sent = ::sendto(it->second.host_fd, d.data(), len, 0, (struct sockaddr*)&dst, sizeof(dst));
+            if (sent < 0 && errno == EISCONN) {
+                // Darwin returns EISCONN if socket is connected: use send()
+                sent = ::send(it->second.host_fd, d.data(), len, 0);
+            }
+        }
+        if (g_trace) {
+            char tag[96];
+            snprintf(tag, sizeof tag, "sendto %u.%u.%u.%u:%u (sent=%zd)",
+                     dest_ip >> 24, (dest_ip >> 16) & 255, (dest_ip >> 8) & 255, dest_ip & 255,
+                     dest_port, sent);
+            hexdump(tag, s, d.data(), (size_t)(len < 64 ? len : 64));
+        }
+        if (sent < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                st.gpr.rax.dword = fail(WSAEWOULDBLOCK_);
+            } else if (errno == EACCES) {
+                st.gpr.rax.dword = fail(10013 /* WSAEACCES */);
+            } else if (errno == EMSGSIZE) {
+                st.gpr.rax.dword = fail(10040 /* WSAEMSGSIZE */);
+            } else {
+                if (g_trace) fprintf(stderr, "[DWP] real sendto fd=%d failed: %s\n",
+                                     it->second.host_fd, strerror(errno));
+                st.gpr.rax.dword = fail(10050 /* WSAENETDOWN */);
+            }
+            win32_stdcall_ret(st, 6);
+            return;
+        }
+        st.gpr.rax.dword = (uint32_t)sent;
+        win32_stdcall_ret(st, 6);
+        return;
+    }
+
+    if (g_trace) {
         std::vector<uint8_t> d(len < 64 ? len : 64);
-        get_bytes(buf, d.data(), (uint32_t)d.size());
-        uint32_t ip = (uint32_t)win32_mem_read8(to + 4) << 24 | win32_mem_read8(to + 5) << 16 |
-                      win32_mem_read8(to + 6) << 8 | win32_mem_read8(to + 7);
+        if (len > 0) get_bytes(buf, d.data(), (uint32_t)d.size());
         char tag[96];
-        snprintf(tag, sizeof tag, "sendto %s:%u", name_of(ip).c_str(), win32_mem_read8(to + 2) << 8 | win32_mem_read8(to + 3));
+        snprintf(tag, sizeof tag, "sendto (no fd) %u.%u.%u.%u:%u",
+                 dest_ip >> 24, (dest_ip >> 16) & 255, (dest_ip >> 8) & 255, dest_ip & 255, dest_port);
         hexdump(tag, s, d.data(), d.size());
     }
     st.gpr.rax.dword = len;
@@ -234,44 +560,198 @@ void impl_wsock_ordinal_20(State& st) {
 // recvfrom(s, buf, len, flags, from, fromlen)
 void impl_wsock_ordinal_17(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
-    uint32_t s = win32_arg(st, 0), buf = win32_arg(st, 1), len = win32_arg(st, 2), from = win32_arg(st, 4),
-             fromlen = win32_arg(st, 5);
+    uint32_t s = win32_arg(st, 0), buf = win32_arg(st, 1), len = win32_arg(st, 2),
+             from = win32_arg(st, 4), fromlen = win32_arg(st, 5);
     auto it = g_socks.find(s);
-    if (it == g_socks.end() || it->second.dgrams.empty()) {
-        st.gpr.rax.dword = fail(it == g_socks.end() ? WSAENOTSOCK_ : WSAEWOULDBLOCK_);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
         win32_stdcall_ret(st, 6);
         return;
     }
-    auto dg = it->second.dgrams.front();
-    it->second.dgrams.pop_front();
-    uint32_t n = len < dg.first.size() ? len : (uint32_t)dg.first.size();
-    put_bytes(buf, dg.first.data(), n);
-    if (from) {
-        uint8_t sa[16] = {2, 0, (uint8_t)(dg.second.second >> 8), (uint8_t)dg.second.second,
-                          (uint8_t)(dg.second.first >> 24), (uint8_t)(dg.second.first >> 16),
-                          (uint8_t)(dg.second.first >> 8), (uint8_t)dg.second.first};
-        put_bytes(from, sa, 16);
-        if (fromlen) win32_mem_write32(fromlen, 16);
+    if (!buf && len > 0) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 6);
+        return;
     }
-    st.gpr.rax.dword = n;
+    if (from && !fromlen) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 6);
+        return;
+    }
+
+    // 1. Synthetic STUN datagrams
+    if (!it->second.dgrams.empty()) {
+        auto dg = it->second.dgrams.front();
+        it->second.dgrams.pop_front();
+        uint32_t n = len < dg.first.size() ? len : (uint32_t)dg.first.size();
+        put_bytes(buf, dg.first.data(), n);
+        if (from) {
+            uint8_t sa[16] = {0};
+            sa[0] = 2; // AF_INET lo
+            sa[1] = 0; // AF_INET hi
+            sa[2] = (uint8_t)(dg.second.second >> 8);
+            sa[3] = (uint8_t)(dg.second.second & 0xFF);
+            sa[4] = (uint8_t)(dg.second.first >> 24);
+            sa[5] = (uint8_t)((dg.second.first >> 16) & 0xFF);
+            sa[6] = (uint8_t)((dg.second.first >> 8) & 0xFF);
+            sa[7] = (uint8_t)(dg.second.first & 0xFF);
+            uint32_t flen = fromlen ? win32_mem_read32(fromlen) : 16;
+            put_bytes(from, sa, flen < 16 ? flen : 16);
+            if (fromlen) win32_mem_write32(fromlen, 16);
+        }
+        st.gpr.rax.dword = n;
+        win32_stdcall_ret(st, 6);
+        return;
+    }
+
+    // 2. Real host socket receive
+    if (it->second.host_fd >= 0) {
+        struct sockaddr_in src{};
+        socklen_t srclen = sizeof(src);
+        static uint8_t tmp[65536]; // Safe static buffer guarded by g_mu
+        ssize_t r = ::recvfrom(it->second.host_fd, tmp, sizeof(tmp), 0,
+                               (struct sockaddr*)&src, &srclen);
+        if (r >= 0) {
+            uint32_t n = len < (uint32_t)r ? len : (uint32_t)r;
+            if (buf && n > 0) put_bytes(buf, tmp, n);
+            if (from) {
+                uint16_t src_port = ntohs(src.sin_port);
+                uint32_t src_ip = ntohl(src.sin_addr.s_addr);
+                uint8_t sa[16] = {0};
+                sa[0] = 2; // AF_INET lo
+                sa[1] = 0; // AF_INET hi
+                sa[2] = (uint8_t)(src_port >> 8);
+                sa[3] = (uint8_t)(src_port & 0xFF);
+                sa[4] = (uint8_t)(src_ip >> 24);
+                sa[5] = (uint8_t)((src_ip >> 16) & 0xFF);
+                sa[6] = (uint8_t)((src_ip >> 8) & 0xFF);
+                sa[7] = (uint8_t)(src_ip & 0xFF);
+                uint32_t flen = fromlen ? win32_mem_read32(fromlen) : 16;
+                put_bytes(from, sa, flen < 16 ? flen : 16);
+                if (fromlen) win32_mem_write32(fromlen, 16);
+            }
+            if (g_trace) {
+                uint16_t src_port = ntohs(src.sin_port);
+                uint32_t src_ip = ntohl(src.sin_addr.s_addr);
+                char tag[96];
+                snprintf(tag, sizeof tag, "recvfrom %u.%u.%u.%u:%u (len=%zd, n=%u)",
+                         src_ip >> 24, (src_ip >> 16) & 255, (src_ip >> 8) & 255, src_ip & 255,
+                         src_port, r, n);
+                hexdump(tag, s, tmp, (size_t)n);
+            }
+            if ((uint32_t)r > len) {
+                g_last_error = 10040 /* WSAEMSGSIZE */;
+            }
+            st.gpr.rax.dword = n;
+            win32_stdcall_ret(st, 6);
+            return;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                st.gpr.rax.dword = fail(WSAEWOULDBLOCK_);
+            } else if (errno == ECONNRESET || errno == ECONNREFUSED) {
+                st.gpr.rax.dword = fail(10054 /* WSAECONNRESET */);
+            } else {
+                st.gpr.rax.dword = fail(10050 /* WSAENETDOWN */);
+            }
+            win32_stdcall_ret(st, 6);
+            return;
+        }
+    }
+
+    st.gpr.rax.dword = fail(WSAEWOULDBLOCK_);
     win32_stdcall_ret(st, 6);
 }
 
-// select(nfds, readfds, writefds, exceptfds, timeout): never waits, answers the state now.
+// select(nfds, readfds, writefds, exceptfds, timeout): polls state of synthetic and host sockets.
 void impl_wsock_ordinal_18(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
     uint32_t rd = win32_arg(st, 1), wr = win32_arg(st, 2), ex = win32_arg(st, 3);
-    std::vector<uint32_t> r, w;
-    for (uint32_t s : fdset_read(rd)) {
-        auto it = g_socks.find(s);
-        if (it != g_socks.end() && (!it->second.rx.empty() || !it->second.dgrams.empty())) r.push_back(s);
+    uint32_t timeout_ptr = win32_arg(st, 4);
+
+    int timeout_ms = 0;
+    if (timeout_ptr != 0) {
+        int32_t sec = (int32_t)win32_mem_read32(timeout_ptr);
+        int32_t usec = (int32_t)win32_mem_read32(timeout_ptr + 4);
+        if (sec < 0) sec = 0;
+        if (usec < 0) usec = 0;
+        timeout_ms = sec * 1000 + (usec + 999) / 1000;
+    } else {
+        // timeout == NULL in Winsock means block until ready. Cap to 50ms to avoid stalling host thread.
+        timeout_ms = 50;
     }
-    for (uint32_t s : fdset_read(wr)) {
+
+    std::vector<uint32_t> r_ready, w_ready;
+    std::vector<uint32_t> rd_socks = fdset_read(rd);
+    std::vector<uint32_t> wr_socks = fdset_read(wr);
+
+    // 1. Check synthetic queues first
+    for (uint32_t s : rd_socks) {
         auto it = g_socks.find(s);
-        if (it != g_socks.end() && (it->second.connected || it->second.type == SOCK_DGRAM_)) w.push_back(s);
+        if (it != g_socks.end()) {
+            if (!it->second.rx.empty() || !it->second.dgrams.empty()) {
+                r_ready.push_back(s);
+            }
+        }
     }
-    fdset_write(rd, r); fdset_write(wr, w); fdset_write(ex, {});
-    st.gpr.rax.dword = (uint32_t)(r.size() + w.size());
+    for (uint32_t s : wr_socks) {
+        auto it = g_socks.find(s);
+        if (it != g_socks.end()) {
+            if (it->second.connected || it->second.type == SOCK_DGRAM_) {
+                w_ready.push_back(s);
+            }
+        }
+    }
+
+    // If synthetic data is already pending, don't block on host poll
+    if (!r_ready.empty()) {
+        timeout_ms = 0;
+    }
+
+    // 2. Poll host descriptors
+    std::vector<struct pollfd> pfds;
+    std::vector<std::pair<uint32_t, short>> pfd_map; // (sock_id, event_type)
+    for (uint32_t s : rd_socks) {
+        auto it = g_socks.find(s);
+        if (it != g_socks.end() && it->second.host_fd >= 0) {
+            struct pollfd p{};
+            p.fd = it->second.host_fd;
+            p.events = POLLIN;
+            pfds.push_back(p);
+            pfd_map.push_back({s, POLLIN});
+        }
+    }
+    for (uint32_t s : wr_socks) {
+        auto it = g_socks.find(s);
+        if (it != g_socks.end() && it->second.host_fd >= 0) {
+            struct pollfd p{};
+            p.fd = it->second.host_fd;
+            p.events = POLLOUT;
+            pfds.push_back(p);
+            pfd_map.push_back({s, POLLOUT});
+        }
+    }
+
+    if (!pfds.empty()) {
+        int poll_rc = ::poll(pfds.data(), (nfds_t)pfds.size(), timeout_ms);
+        if (poll_rc > 0) {
+            for (size_t i = 0; i < pfds.size(); i++) {
+                if (pfd_map[i].second == POLLIN && (pfds[i].revents & (POLLIN | POLLHUP | POLLERR))) {
+                    if (std::find(r_ready.begin(), r_ready.end(), pfd_map[i].first) == r_ready.end()) {
+                        r_ready.push_back(pfd_map[i].first);
+                    }
+                } else if (pfd_map[i].second == POLLOUT && (pfds[i].revents & POLLOUT)) {
+                    if (std::find(w_ready.begin(), w_ready.end(), pfd_map[i].first) == w_ready.end()) {
+                        w_ready.push_back(pfd_map[i].first);
+                    }
+                }
+            }
+        }
+    }
+
+    fdset_write(rd, r_ready);
+    fdset_write(wr, w_ready);
+    fdset_write(ex, {});
+    st.gpr.rax.dword = (uint32_t)(r_ready.size() + w_ready.size());
     win32_stdcall_ret(st, 5);
 }
 
@@ -287,7 +767,13 @@ void impl_wsock_ordinal_151(State& st) {
 // inet_addr(cp) (wsock32 numbering: 10 = inet_addr, 12 = ioctlsocket): dotted quad -> address in network order,
 // INADDR_NONE if it does not parse. The UPnP client parses "239.255.255.250" with it every frame.
 void impl_wsock_ordinal_10(State& st) {
-    st.gpr.rax.dword = inet_addr(get_cstr(win32_arg(st, 0)).c_str());
+    uint32_t cp = win32_arg(st, 0);
+    if (!cp) {
+        st.gpr.rax.dword = 0xFFFFFFFFu;
+        win32_stdcall_ret(st, 1);
+        return;
+    }
+    st.gpr.rax.dword = inet_addr(get_cstr(cp).c_str());
     win32_stdcall_ret(st, 1);
 }
 
@@ -295,6 +781,123 @@ void impl_wsock_ordinal_10(State& st) {
 void impl_wsock_ordinal_9(State& st) {
     st.gpr.rax.dword = __builtin_bswap16((uint16_t)win32_arg(st, 0));
     win32_stdcall_ret(st, 1);
+}
+
+// ioctlsocket(s, cmd, argp)
+void impl_wsock_ordinal_12(State& st) {
+    std::lock_guard<std::mutex> l(g_mu);
+    uint32_t s = win32_arg(st, 0), cmd = win32_arg(st, 1), argp = win32_arg(st, 2);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+    constexpr uint32_t FIONBIO_ = 0x8004667e;
+    constexpr uint32_t FIONREAD_ = 0x4004667f;
+    if (cmd == FIONBIO_) {
+        if (argp && it->second.host_fd >= 0) {
+            uint32_t nonblock = win32_mem_read32(argp);
+            int flags = fcntl(it->second.host_fd, F_GETFL, 0);
+            if (flags >= 0) {
+                if (nonblock) fcntl(it->second.host_fd, F_SETFL, flags | O_NONBLOCK);
+                else fcntl(it->second.host_fd, F_SETFL, flags & ~O_NONBLOCK);
+            }
+        }
+        st.gpr.rax.dword = 0;
+        win32_stdcall_ret(st, 3);
+        return;
+    } else if (cmd == FIONREAD_) {
+        uint32_t n = 0;
+        if (!it->second.dgrams.empty()) {
+            n = (uint32_t)it->second.dgrams.front().first.size();
+        } else if (it->second.host_fd >= 0) {
+            static uint8_t dummy[65536]; // under g_mu
+            ssize_t r = ::recv(it->second.host_fd, dummy, sizeof(dummy), MSG_PEEK);
+            if (r > 0) {
+                n = (uint32_t)r;
+            }
+        } else if (!it->second.rx.empty()) {
+            n = (uint32_t)it->second.rx.size();
+        }
+        if (argp) win32_mem_write32(argp, n);
+        st.gpr.rax.dword = 0;
+        win32_stdcall_ret(st, 3);
+        return;
+    }
+    st.gpr.rax.dword = 0;
+    win32_stdcall_ret(st, 3);
+}
+
+// getsockopt(s, level, optname, optval, optlen)
+void impl_ws2_ordinal_7(State& st) {
+    std::lock_guard<std::mutex> l(g_mu);
+    uint32_t s = win32_arg(st, 0), level = win32_arg(st, 1), optname = win32_arg(st, 2),
+             optval = win32_arg(st, 3), optlen_ptr = win32_arg(st, 4);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+        win32_stdcall_ret(st, 5);
+        return;
+    }
+    if (!optval || !optlen_ptr) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 5);
+        return;
+    }
+    uint32_t buflen = win32_mem_read32(optlen_ptr);
+    if (buflen < 4) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 5);
+        return;
+    }
+
+    if (it->second.host_fd >= 0) {
+        int host_level = (level == 0xFFFF) ? SOL_SOCKET : (int)level;
+        int host_optname = (int)optname;
+        int val = 0;
+        socklen_t host_len = sizeof(val);
+        int rc = ::getsockopt(it->second.host_fd, host_level, host_optname, &val, &host_len);
+        if (rc == 0) {
+            win32_mem_write32(optval, (uint32_t)val);
+            win32_mem_write32(optlen_ptr, 4);
+            st.gpr.rax.dword = 0;
+            win32_stdcall_ret(st, 5);
+            return;
+        }
+    }
+
+    // Default safe fallback for synthetic sockets: no error
+    win32_mem_write32(optval, 0);
+    win32_mem_write32(optlen_ptr, 4);
+    st.gpr.rax.dword = 0;
+    win32_stdcall_ret(st, 5);
+}
+
+// setsockopt(s, level, optname, optval, optlen)
+void impl_wsock_ordinal_21(State& st) {
+    std::lock_guard<std::mutex> l(g_mu);
+    uint32_t s = win32_arg(st, 0), level = win32_arg(st, 1), optname = win32_arg(st, 2),
+             optval = win32_arg(st, 3), optlen = win32_arg(st, 4);
+    auto it = g_socks.find(s);
+    if (it == g_socks.end()) {
+        st.gpr.rax.dword = fail(WSAENOTSOCK_);
+        win32_stdcall_ret(st, 5);
+        return;
+    }
+    if (!optval || optlen < 4) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 5);
+        return;
+    }
+
+    if (it->second.host_fd >= 0) {
+        int val = (int)win32_mem_read32(optval);
+        int host_level = (level == 0xFFFF) ? SOL_SOCKET : (int)level;
+        ::setsockopt(it->second.host_fd, host_level, (int)optname, &val, sizeof(val));
+    }
+    st.gpr.rax.dword = 0;
+    win32_stdcall_ret(st, 5);
 }
 
 // gethostname(name, namelen)
@@ -307,18 +910,43 @@ void impl_wsock_ordinal_57(State& st) {
     win32_stdcall_ret(st, 2);
 }
 
-// gethostbyname(name): demonware.net names and this host resolve; anything else does not.
+// gethostbyname(name): demonware.net names and this host resolve; peer hostnames resolve via host DNS.
 void impl_wsock_ordinal_52(State& st) {
     std::lock_guard<std::mutex> l(g_mu);
-    std::string n = get_cstr(win32_arg(st, 0));
+    uint32_t name_va = win32_arg(st, 0);
+    if (!name_va) {
+        st.gpr.rax.dword = fail(10014 /* WSAEFAULT */);
+        win32_stdcall_ret(st, 1);
+        return;
+    }
+    std::string n = get_cstr(name_va);
     auto ends = [&](const char* suf) { size_t k = strlen(suf); return n.size() >= k && n.compare(n.size() - k, k, suf) == 0; };
     uint32_t ip = 0;
-    if (n == "bo2-native" || n == "localhost") ip = LOCAL_IP;
-    else if (ends(".demonware.net")) {
+    if (n == "bo2-native" || n == "localhost") {
+        ip = LOCAL_IP;
+    } else if (ends(".demonware.net")) {
         auto f = g_name_ip.find(n);
         ip = f != g_name_ip.end() ? f->second : NET + 1 + (uint32_t)g_name_ip.size();
+    } else if (!n.empty()) {
+        struct hostent* he_real = ::gethostbyname(n.c_str());
+        if (he_real && he_real->h_addrtype == AF_INET && he_real->h_addr_list && he_real->h_addr_list[0]) {
+            struct in_addr in;
+            std::memcpy(&in, he_real->h_addr_list[0], sizeof(in));
+            ip = ntohl(in.s_addr);
+        } else {
+            struct addrinfo hints{}, *res = nullptr;
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            if (::getaddrinfo(n.c_str(), nullptr, &hints, &res) == 0 && res != nullptr) {
+                struct sockaddr_in* sin = (struct sockaddr_in*)res->ai_addr;
+                ip = ntohl(sin->sin_addr.s_addr);
+                freeaddrinfo(res);
+            }
+        }
     }
-    if (g_trace) fprintf(stderr, "[DWP] gethostbyname \"%s\" -> %s\n", n.c_str(), ip ? "ok" : "absent");
+    if (g_trace) fprintf(stderr, "[DWP] gethostbyname \"%s\" -> %s (%u.%u.%u.%u)\n",
+                         n.c_str(), ip ? "ok" : "absent",
+                         ip >> 24, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255);
     if (!ip) { g_last_error = WSAHOST_NOT_FOUND_; st.gpr.rax.dword = 0; win32_stdcall_ret(st, 1); return; }
     g_name_ip[n] = ip;
     uint32_t& he = g_hostent[n];
@@ -337,6 +965,9 @@ void impl_wsock_ordinal_52(State& st) {
         uint8_t a[4] = {(uint8_t)(ip >> 24), (uint8_t)(ip >> 16), (uint8_t)(ip >> 8), (uint8_t)ip};
         put_bytes(addr, a, 4);
         put_bytes(nm, (const uint8_t*)n.c_str(), (uint32_t)n.size() + 1);
+    } else {
+        uint8_t a[4] = {(uint8_t)(ip >> 24), (uint8_t)(ip >> 16), (uint8_t)(ip >> 8), (uint8_t)ip};
+        put_bytes(he + 28, a, 4);
     }
     st.gpr.rax.dword = he;
     win32_stdcall_ret(st, 1);
@@ -344,6 +975,12 @@ void impl_wsock_ordinal_52(State& st) {
 
 // WSAGetLastError()
 void impl_wsock_ordinal_111(State& st) { st.gpr.rax.dword = g_last_error; win32_stdcall_ret(st, 0); }
+
+// WSASetLastError(iError)
+void impl_ws2_ordinal_112(State& st) {
+    g_last_error = win32_arg(st, 0);
+    win32_stdcall_ret(st, 1);
+}
 
 // inet_ntoa(in): one argument, the address in network order.
 void impl_ws2_ordinal_12(State& st) {

@@ -127,8 +127,8 @@ DLL_STUB3(mixerGetLineInfoA)        // (hmxobj, pmxl, fdwInfo)
 // Winsock 1.1 — stub for offline. Ordinals #2,3,9,10,12,16,17,18,19,20,21,22,23,52,57,111,115,151
 // We can't easily map ordinals to names, so use generic stubs
 // The IAT table stores ordinal numbers as "#N" — we'll handle them in init
-DLL_STUB3(wsock_ordinal_12)  // ioctlsocket(s, cmd, argp)
-DLL_STUB5(wsock_ordinal_21)  // setsockopt(s, level, optname, optval, optlen)
+void impl_wsock_ordinal_12(State&);  // ioctlsocket(s, cmd, argp): dw_local.cpp
+void impl_wsock_ordinal_21(State&);  // setsockopt(s, level, optname, optval, optlen): dw_local.cpp
 DLL_STUB2(wsock_ordinal_22)  // shutdown(s, how)
 DLL_STUB2(wsock_ordinal_115) // WSAStartup(wVersionRequested, lpWSAData)
 // t6zm: these twelve and connect (4) answer as winsock does, and the title's Demonware client finds a responder
@@ -149,10 +149,11 @@ DLL_STUB0(wsock_ordinal_116) // WSACleanup(void)
 
 // --- WS2_32 (5 functions, by ordinal) ---
 DLL_STUB3(ws2_ordinal_4)     // connect(s, name, namelen)
-DLL_STUB3(ws2_ordinal_6)     // getsockname(s, name, namelen)
+void impl_ws2_ordinal_6(State&);    // getsockname(s, name, namelen): dw_local.cpp
+void impl_ws2_ordinal_7(State&);    // getsockopt(s, level, optname, optval, optlen): dw_local.cpp
 void impl_ws2_ordinal_12(State&);   // inet_ntoa(in), ONE argument: dw_local.cpp (Z-NATIF-12d)
-DLL_STUB1(ws2_ordinal_15)    // ntohs(netshort)
-DLL_STUB1(ws2_ordinal_112)   // WSASetLastError(iError)
+static void impl_ws2_ordinal_15(State& s) { s.gpr.rax.dword = __builtin_bswap16((uint16_t)win32_arg(s, 0)); win32_stdcall_ret(s, 1); }   // ntohs(netshort)
+void impl_ws2_ordinal_112(State&);  // WSASetLastError(iError): dw_local.cpp
 
 // --- binkw32 (19 functions) ---
 // All return 0 — video is decoded natively instead.
@@ -5957,7 +5958,21 @@ static const ImportEntry remaining_dlls_impls[] = {
     {"WSOCK32_dll!Ordinal_4",   impl_wsock_ordinal_4},    // connect(3)
     {"WS2_32_dll!Ordinal_4",    impl_wsock_ordinal_4},    // connect(3) : t6sp l'importe de WS2_32 (P928)
     {"WS2_32_dll!Ordinal_6",    impl_ws2_ordinal_6},      // getsockname(3)
-    {"WS2_32_dll!Ordinal_12",   impl_ws2_ordinal_12},     // ioctlsocket(3)
+    {"WSOCK32_dll!Ordinal_6",   impl_ws2_ordinal_6},      // getsockname(3)
+    {"WS2_32_dll!Ordinal_7",    impl_ws2_ordinal_7},      // getsockopt(5)
+    {"WSOCK32_dll!Ordinal_7",   impl_ws2_ordinal_7},      // getsockopt(5)
+    {"WS2_32_dll!Ordinal_2",    impl_wsock_ordinal_2},    // bind(3)
+    {"WS2_32_dll!Ordinal_3",    impl_wsock_ordinal_3},    // closesocket(1)
+    {"WS2_32_dll!Ordinal_16",   impl_wsock_ordinal_16},   // recv(4)
+    {"WS2_32_dll!Ordinal_17",   impl_wsock_ordinal_17},   // recvfrom(6)
+    {"WS2_32_dll!Ordinal_18",   impl_wsock_ordinal_18},   // select(5)
+    {"WS2_32_dll!Ordinal_19",   impl_wsock_ordinal_19},   // send(4)
+    {"WS2_32_dll!Ordinal_20",   impl_wsock_ordinal_20},   // sendto(6)
+    {"WS2_32_dll!Ordinal_21",   impl_wsock_ordinal_21},   // setsockopt(5)
+    {"WS2_32_dll!Ordinal_23",   impl_wsock_ordinal_23},   // socket(3)
+    {"WS2_32_dll!Ordinal_52",   impl_wsock_ordinal_52},   // gethostbyname(1)
+    {"WS2_32_dll!Ordinal_111",  impl_wsock_ordinal_111},  // WSAGetLastError(0)
+    {"WS2_32_dll!Ordinal_12",   impl_ws2_ordinal_12},     // inet_ntoa(1)
     // inet_ntoa(1) : les exes Steam l'importent de WSOCK32 (ordinal 11). Sans elle, chaîne
     // illisible (« Binding to ﾭ� ») puis tableau des hôtes STUN détruit sur un slot d'import (P973).
     {"WSOCK32_dll!Ordinal_11",  impl_ws2_ordinal_12},

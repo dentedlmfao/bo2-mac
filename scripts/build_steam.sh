@@ -48,8 +48,18 @@ say "10 %  Remill ready"
 # The conversion stops after this mode (sps, zms or mps): "Play the campaign" writes sps, picking an unconverted mode in
 # the game's menu raises it (scripts/play_steam.sh). No file: all three (issue #3).
 FIN=$(cat $BC/conversion_target 2>/dev/null) || true; case "$FIN" in sps|zms) ;; *) FIN=mps ;; esac
+if [ -n "${BO2_TARGET:-}" ]; then
+  case "$BO2_TARGET" in
+    zms) SPECS=("zms 12533 t6zm"); FIN=zms ;;
+    sps) SPECS=("sps 9211 t6sp"); FIN=sps ;;
+    mps) SPECS=("mps 12664 t6mp"); FIN=mps ;;
+    *) die "unknown BO2_TARGET: $BO2_TARGET" ;;
+  esac
+else
+  SPECS=("sps 9211 t6sp" "zms 12533 t6zm" "mps 12664 t6mp")
+fi
 P=10
-for spec in "sps 9211 t6sp" "zms 12533 t6zm" "mps 12664 t6mp"; do
+for spec in "${SPECS[@]}"; do
   set -- $spec; t=$1; N=$2; W=$BC/$t; mkdir -p $W
   # Sources changed since the mode was converted (scripts/signature.sh): a lift source redoes lift, fold and link, a
   # half-done lift included (what it left was made from the old sources); a link source only the link. A mode converted

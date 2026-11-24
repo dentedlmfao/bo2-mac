@@ -9,20 +9,24 @@ case $T in
   sps) TOUS=(47b080 47b4e0 47ba60 47c110) ;;
   mps) TOUS=(59a120 459800 459ce0 45a150 47ab10 47af70 47b4f0 47bba0) ;;
   zms) TOUS=(59b6c0 4584c0 47acf0 47b150 47b6d0 47bd80
-            55af10 41c800 41bb80 41bb10 6ec9f0 5d6b30 4ad550 9345b0 9315c0 696fe0 522bf0 457970 4106f0 4dd1b0 539990
+            55af10 41c800 41bb80 41bb10 6ec9f0 5d6b30 4ad550 9345b0 9315c0 696fe0 522bf0 457970 4106f0 4dd1b0 539990:1d9
             4adaa0 4ca660) ;;
   *) echo "usage: native_impl.sh sps|mps|zms"; exit 1 ;;
 esac
 VAS=()
-for va in $TOUS; do $L/llvm-nm --defined-only -j $O | grep -qx _sub_${va}_impl || VAS+=($va); done
+for spec in $TOUS; do
+  va=${spec%:*}
+  $L/llvm-nm --defined-only -j $O | grep -qx _sub_${va}_impl || VAS+=($spec)
+done
 [ ${#VAS} -eq 0 ] && { echo "deja dans lifted.o"; exit 0; }
 BO2_TARGET=$T BOOT_WORKDIR=boot_cache/$T BO2_INLINE_FLAGS=1 BO2_INLINE_TRIV=1 BO2_INLINE_READS=1 BO2_INLINE_WRITES=1 python3 -c "
 import sys; sys.path.insert(0,'tools'); import lift_extra
 lift_extra.WORKDIR='$W'; v='${VAS[*]}'.split(); assert len(lift_extra.lift(v))==len(v)"
-for va in $VAS; do
+for spec in $VAS; do
+  va=${spec%:*}
   $L/clang -arch arm64 -c -O2 -x ir -o $W/$va.o $W/func_$va.bc.fixed
   $L/llvm-objcopy --redefine-sym _sub_$va=_sub_${va}_impl $W/$va.o $W/${va}_impl.o
 done
-$L/clang -arch arm64 -r -nostdlib -o $O.new $O $(for va in $VAS; do echo $W/${va}_impl.o; done)
+$L/clang -arch arm64 -r -nostdlib -o $O.new $O $(for spec in $VAS; do echo $W/${spec%:*}_impl.o; done)
 mv $O.new $O
 echo "impl joints a $O : $VAS"

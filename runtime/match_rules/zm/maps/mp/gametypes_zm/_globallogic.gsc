@@ -53,12 +53,18 @@ set_environment_flags()
     level.xenon = 0;
     level.ps3 = 0;
     level.wiiu = 0;
-    level.onlinegame = 0;
+    level.onlinegame = getdvarint( "onlinegame" ) > 0;
     level.rankedmatch = 0;
-    level.systemlink = 0;
+    level.systemlink = getdvarint( "systemlink" ) > 0;
     level.leaguematch = 0;
     level.wagermatch = 0;
     level.multiteam = 0;
+
+    if ( !level.onlinegame && !level.systemlink )
+    {
+        if ( getdvarint( "sv_maxclients" ) > 1 || getdvarint( "com_maxclients" ) > 1 )
+            level.systemlink = 1;
+    }
 
     level.hardcoremode = setting( "hardcoreMode", 0 );
     level.oldschool = getdvarint( "scr_oldschool" );
@@ -215,7 +221,20 @@ set_default_rules()
     level.defaultclass = "CLASS_ASSAULT";
     level.globallarryskilled = 0;
 
+    level.spawnplayer = maps\mp\gametypes_zm\_globallogic_spawn::spawnplayer;
+    level.spawnclient = maps\mp\gametypes_zm\_globallogic_spawn::spawnclient;
+    level.spawnspectator = maps\mp\gametypes_zm\_globallogic_spawn::spawnspectator;
+    level.spawnintermission = maps\mp\gametypes_zm\_globallogic_spawn::spawnintermission;
     level.spawnmessage = maps\mp\gametypes_zm\_globallogic_spawn::default_spawnmessage;
+
+    level.onplayerconnect = ::blank;
+    level.onplayerdisconnect = ::blank;
+    level.onplayerdamage = ::blank;
+    level.onplayerkilled = ::blank;
+    level.onrespawndelay = ::blank;
+    level.onstartgametype = ::blank;
+    level.onprecachegametype = ::blank;
+    level.onendgame = ::blank;
 
     // Droits de parole lus entre deux manches : tout autorisé.
     level.voip = spawnstruct();
@@ -237,6 +256,12 @@ init_level_state()
     level.inprematchperiod = 0;
     level.prematchperiod = 0;
     level.timerstopped = 0;
+    maxclients = getdvarint( "sv_maxclients" );
+    if ( maxclients < 4 )
+        maxclients = getdvarint( "com_maxclients" );
+    if ( maxclients < 4 )
+        maxclients = 4;
+    level.maxclients = maxclients;
     level.maxplayercount = 0;
     level.postroundtime = 0;
     level.infinalkillcam = 0;
@@ -280,6 +305,28 @@ init_level_state()
     }
 }
 
+setupcallbacks()
+{
+    level.spawnplayer = maps\mp\gametypes_zm\_globallogic_spawn::spawnplayer;
+    level.spawnplayerprediction = maps\mp\gametypes_zm\_globallogic_spawn::spawnplayerprediction;
+    level.spawnclient = maps\mp\gametypes_zm\_globallogic_spawn::spawnclient;
+    level.spawnspectator = maps\mp\gametypes_zm\_globallogic_spawn::spawnspectator;
+    level.spawnintermission = maps\mp\gametypes_zm\_globallogic_spawn::spawnintermission;
+    level.spawnmessage = maps\mp\gametypes_zm\_globallogic_spawn::default_spawnmessage;
+
+    level.onplayerdisconnect = ::blank;
+    level.onplayerdamage = ::blank;
+    level.onplayerkilled = ::blank;
+    level.onrespawndelay = ::blank;
+
+    level.onstartgametype = ::blank;
+    level.onprecachegametype = ::blank;
+    level.onroundswitch = ::blank;
+    level.onendgame = ::blank;
+
+    level.onplayerconnect = ::blank;
+}
+
 registerfriendlyfiredelay( gametype, defaultvalue, minvalue, maxvalue )
 {
     value = defaultvalue;
@@ -306,8 +353,10 @@ callback_startgametype()
     precache_hud_assets();
     init_modules();
 
-    [[ level.onprecachegametype ]]();
-    [[ level.onstartgametype ]]();
+    if ( isdefined( level.onprecachegametype ) )
+        [[ level.onprecachegametype ]]();
+    if ( isdefined( level.onstartgametype ) )
+        [[ level.onstartgametype ]]();
 
     level.gameended = 0;
     level.ingraceperiod = 0;

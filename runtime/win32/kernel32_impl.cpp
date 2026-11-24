@@ -66,6 +66,7 @@ extern "C" {
     uint8_t win32_mem_read8(uint32_t a);
     void win32_mem_write8(uint32_t a, uint8_t v);
     uint32_t __remill_symbolic_FSBASE(void);
+    void bo2_raise_exception(State* s);
 }
 
 // --- guest-side allocator -------------------------------------------------
@@ -4901,6 +4902,28 @@ static void win32_resolve_path(uint32_t guest_ptr, char* out, size_t outsz) {
     for (; *p && n + 1 < outsz; p++) out[n++] = (*p == '\\') ? '/' : *p;
     out[n] = 0;
 }
+static inline uint16_t guest_read16(uint32_t a) {
+    return (uint16_t)(win32_mem_read8(a) | (win32_mem_read8(a + 1) << 8));
+}
+static inline void guest_write16(uint32_t a, uint16_t v) {
+    win32_mem_write8(a, (uint8_t)v);
+    win32_mem_write8(a + 1, (uint8_t)(v >> 8));
+}
+static void win32_resolve_path_w(uint32_t guest_ptr, char* out, size_t outsz) {
+    char raw[1024]; int i = 0;
+    for (; i < 1023; i++) {
+        uint16_t c = guest_read16(guest_ptr + i * 2);
+        raw[i] = (c < 128) ? (char)c : '?';
+        if (!c) break;
+    }
+    raw[1023] = 0;
+    const char* p = raw;
+    if (p[0] && p[1] == ':') p += 2;              // strip drive "X:"
+    while (*p == '\\' || *p == '/') p++;           // strip leading separators
+    size_t n = snprintf(out, outsz, "%s/", GAME_DIR);
+    for (; *p && n + 1 < outsz; p++) out[n++] = (*p == '\\') ? '/' : *p;
+    out[n] = 0;
+}
 
 // .webm file descriptors, so ReadFile can report on THEM specifically.
 //
@@ -5063,6 +5086,43 @@ static void impl_CreateFileA(State& s) {
     // rather than by a conclusion. See the [ZONE-LOAD] asymmetry instead.
     if (fd < 0) {
         s.gpr.rax.dword = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
+        t_last_error = errno;
+    } else {
+        s.gpr.rax.dword = (uint32_t)fd;
+    }
+    win32_stdcall_ret(s, 7);
+}
+
+static void impl_CreateFileW(State& s) {
+    uint32_t filename_ptr = win32_arg(s, 0);
+    uint32_t access = win32_arg(s, 1);
+    uint32_t disp = win32_arg(s, 4);
+    char filename[1200];
+    win32_resolve_path_w(filename_ptr, filename, sizeof(filename));
+    int flags_posix = 0;
+    if (access & 0x80000000) {
+        flags_posix = (access & 0x40000000) ? O_RDWR : O_RDONLY;
+    } else if (access & 0x40000000) {
+        flags_posix = O_WRONLY;
+    }
+    if (disp == 1) flags_posix |= O_CREAT | O_EXCL;
+    else if (disp == 2) flags_posix |= O_CREAT | O_TRUNC;
+    else if (disp == 4) flags_posix |= O_CREAT;
+    else if (disp == 5) flags_posix |= O_TRUNC;
+    int fd = open(filename, flags_posix, 0644);
+    static int g_fd_floor_w = 64;
+    if (fd >= 0 && !bo2_getenv("BO2_ALLOW_FD_REUSE")) {
+        const int hi = fcntl(fd, F_DUPFD, g_fd_floor_w);
+        if (hi >= 0) {
+            close(fd);
+            fd = hi;
+            g_fd_floor_w = hi + 1;
+        }
+    }
+    fprintf(stderr, "[CreateFileW] \"%s\" -> %s (fd=%d ret=0x%08x)\n",
+            filename, fd < 0 ? "FAIL" : "ok", fd, win32_mem_read32(s.gpr.rsp.dword));
+    if (fd < 0) {
+        s.gpr.rax.dword = 0xFFFFFFFF;
         t_last_error = errno;
     } else {
         s.gpr.rax.dword = (uint32_t)fd;
@@ -6213,8 +6273,7 @@ static void impl_RaiseException(State& s) {
             fprintf(stderr, "  catchable[%u] type='%s'\n", t, nm);
         }
     }
-    fprintf(stderr, "[RaiseException] unhandled exception\n");
-    abort();
+    bo2_raise_exception(&s);
 }
 
 // --- STUBS (return 0, pop the right number of args) ---
@@ -6718,11 +6777,74 @@ static void impl_GetModuleHandleExA(State& s) {
     win32_stdcall_ret(s, 3);
 }
 STUB7(FormatMessageA)               // (flags, src, msgId, langId, buf, size, args)
-STUB1(GetDriveTypeA)                // (lpRootPathName)
-STUB1(GetDriveTypeW)                // (lpRootPathName)
-STUB2(GetWindowsDirectoryW)         // (lpBuffer, uSize) ; Zombies : vraie implementation
-STUB2(GetSystemDirectoryW)          // (lpBuffer, uSize) ; Zombies : vraie implementation
-STUB2(GetComputerNameA)             // (lpBuffer, nSize)
+static void impl_GetDriveTypeA(State& s) {
+    s.gpr.rax.dword = 3; // DRIVE_FIXED
+    win32_stdcall_ret(s, 1);
+}
+static void impl_GetDriveTypeW(State& s) {
+    s.gpr.rax.dword = 3; // DRIVE_FIXED
+    win32_stdcall_ret(s, 1);
+}
+static void impl_GetWindowsDirectoryW(State& s) {
+    uint32_t buf = win32_arg(s, 0);
+    uint32_t size = win32_arg(s, 1);
+    static const wchar_t winDir[] = L"C:\\Windows";
+    constexpr uint32_t len = 10;
+    constexpr uint32_t req = 11;
+    if (!buf || size < req) {
+        s.gpr.rax.dword = req;
+    } else {
+        for (uint32_t i = 0; i <= len; ++i) {
+            guest_write16(buf + i * 2, (uint16_t)winDir[i]);
+        }
+        s.gpr.rax.dword = len;
+    }
+    fprintf(stderr, "[GetWindowsDirectoryW] buf=0x%08x size=%u -> %u\n", buf, size, s.gpr.rax.dword);
+    win32_stdcall_ret(s, 2);
+}
+static void impl_GetSystemDirectoryW(State& s) {
+    uint32_t buf = win32_arg(s, 0);
+    uint32_t size = win32_arg(s, 1);
+    static const wchar_t sysDir[] = L"C:\\Windows\\System32";
+    constexpr uint32_t len = 19;
+    constexpr uint32_t req = 20;
+    if (!buf || size < req) {
+        s.gpr.rax.dword = req;
+    } else {
+        for (uint32_t i = 0; i <= len; ++i) {
+            guest_write16(buf + i * 2, (uint16_t)sysDir[i]);
+        }
+        s.gpr.rax.dword = len;
+    }
+    fprintf(stderr, "[GetSystemDirectoryW] buf=0x%08x size=%u -> %u\n", buf, size, s.gpr.rax.dword);
+    win32_stdcall_ret(s, 2);
+}
+static void impl_GetComputerNameA(State& s) {
+    uint32_t buf = win32_arg(s, 0);
+    uint32_t size_ptr = win32_arg(s, 1);
+    static const char name[] = "BO2-MAC";
+    constexpr uint32_t len = 7;
+    if (!size_ptr) {
+        s.gpr.rax.dword = 0;
+        t_last_error = 87;
+        win32_stdcall_ret(s, 2);
+        return;
+    }
+    uint32_t max_len = win32_mem_read32(size_ptr);
+    if (!buf || max_len < len + 1) {
+        win32_mem_write32(size_ptr, len + 1);
+        t_last_error = 111;
+        s.gpr.rax.dword = 0;
+    } else {
+        for (uint32_t i = 0; i <= len; ++i) {
+            win32_mem_write8(buf + i, (uint8_t)name[i]);
+        }
+        win32_mem_write32(size_ptr, len);
+        s.gpr.rax.dword = 1;
+    }
+    fprintf(stderr, "[GetComputerNameA] -> %s (ret=%u)\n", name, s.gpr.rax.dword);
+    win32_stdcall_ret(s, 2);
+}
 STUB0(GetConsoleWindow)             // (void)
 STUB0(GetConsoleCP)                 // (void)
 STUB2(GetConsoleMode)               // (hConsole, lpMode)
@@ -6751,7 +6873,7 @@ STUB1(GetStdHandle)
 static uint32_t guest_ncpu() {
     static const uint32_t ncpu = [] {
         const char* e = bo2_getenv("BO2_CPUS");
-        uint32_t v = e ? (uint32_t)strtoul(e, nullptr, 10) : 8u;
+        uint32_t v = e ? (uint32_t)strtoul(e, nullptr, 10) : 4u;
         return v ? (v > 32u ? 32u : v) : 1u;
     }();
     return ncpu;
@@ -6962,13 +7084,106 @@ STUB2(IsValidLocale)            // (Locale, dwFlags)
 STUB2(EnumSystemLocalesA)       // (lpLocaleEnumProc, dwFlags)
 STUB4(GetLocaleInfoA)           // (Locale, LCType, lpLCData, cchData)
 STUB4(GetLocaleInfoW)
-STUB0(GetUserDefaultLCID)       // (void)
-STUB6(CompareStringW)           // (Locale, dwCmpFlags, s1, cch1, s2, cch2)
-STUB6(LCMapStringW)             // (Locale, dwMapFlags, src, cchSrc, dest, cchDest)
-STUB2(GetCPInfo)                // (CodePage, lpCPInfo)
-STUB0(GetACP)                   // (void)
-STUB0(GetOEMCP)                 // (void)
-STUB1(IsValidCodePage)
+static void impl_GetUserDefaultLCID(State& s) {
+    s.gpr.rax.dword = 0x0409; // en-US
+    win32_stdcall_ret(s, 0);
+}
+
+static void impl_GetACP(State& s) {
+    s.gpr.rax.dword = 1252; // ANSI Latin 1
+    win32_stdcall_ret(s, 0);
+}
+
+static void impl_GetOEMCP(State& s) {
+    s.gpr.rax.dword = 437; // OEM US
+    win32_stdcall_ret(s, 0);
+}
+
+static void impl_IsValidCodePage(State& s) {
+    s.gpr.rax.dword = 1; // TRUE
+    win32_stdcall_ret(s, 1);
+}
+
+static void impl_GetCPInfo(State& s) {
+    // BOOL GetCPInfo(UINT CodePage, LPCPINFO lpCPInfo) — 2 args
+    uint32_t pinfo = win32_arg(s, 1);
+    if (pinfo) {
+        // struct CPINFO { UINT MaxCharSize; BYTE DefaultChar[2]; BYTE LeadByte[12]; };
+        win32_mem_write32(pinfo + 0, 1); // MaxCharSize = 1
+        win32_mem_write8(pinfo + 4, (uint8_t)'?');
+        win32_mem_write8(pinfo + 5, 0);
+        for (int i = 0; i < 12; i++) win32_mem_write8(pinfo + 6 + i, 0);
+    }
+    s.gpr.rax.dword = 1; // TRUE
+    win32_stdcall_ret(s, 2);
+}
+
+static inline uint16_t mem_read16(uint32_t a) {
+    return (uint16_t)win32_mem_read8(a) | ((uint16_t)win32_mem_read8(a + 1) << 8);
+}
+static inline void mem_write16(uint32_t a, uint16_t v) {
+    win32_mem_write8(a, (uint8_t)v);
+    win32_mem_write8(a + 1, (uint8_t)(v >> 8));
+}
+
+static void impl_CompareStringW(State& s) {
+    // int CompareStringW(LCID Locale, DWORD dwCmpFlags, LPCWCH lpString1, int cchCount1, LPCWCH lpString2, int cchCount2) — 6 args
+    uint32_t flags = win32_arg(s, 1);
+    uint32_t s1 = win32_arg(s, 2);
+    int32_t  cch1 = (int32_t)win32_arg(s, 3);
+    uint32_t s2 = win32_arg(s, 4);
+    int32_t  cch2 = (int32_t)win32_arg(s, 5);
+    bool ignore_case = (flags & 1 /* NORM_IGNORECASE */) != 0;
+    uint32_t i1 = 0, i2 = 0;
+    while (true) {
+        uint16_t c1 = (cch1 < 0 || (int32_t)i1 < cch1) ? mem_read16(s1 + i1 * 2) : 0;
+        uint16_t c2 = (cch2 < 0 || (int32_t)i2 < cch2) ? mem_read16(s2 + i2 * 2) : 0;
+        if (ignore_case) {
+            if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+            if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+        }
+        if (c1 != c2) {
+            s.gpr.rax.dword = (c1 < c2) ? 1 /* CSTR_LESS_THAN */ : 3 /* CSTR_GREATER_THAN */;
+            win32_stdcall_ret(s, 6);
+            return;
+        }
+        if (c1 == 0) break;
+        i1++; i2++;
+    }
+    s.gpr.rax.dword = 2; // CSTR_EQUAL
+    win32_stdcall_ret(s, 6);
+}
+
+static void impl_LCMapStringW(State& s) {
+    // int LCMapStringW(LCID Locale, DWORD dwMapFlags, LPCWCH lpSrcStr, int cchSrc, LPWSTR lpDestStr, int cchDest) — 6 args
+    uint32_t flags = win32_arg(s, 1);
+    uint32_t src = win32_arg(s, 2);
+    int32_t  cch_src = (int32_t)win32_arg(s, 3);
+    uint32_t dst = win32_arg(s, 4);
+    int32_t  cch_dst = (int32_t)win32_arg(s, 5);
+    uint32_t count = (cch_src < 0) ? 0 : (uint32_t)cch_src;
+    if (cch_src < 0) {
+        while (mem_read16(src + count * 2) != 0) count++;
+        count++; // include null
+    }
+    if (cch_dst == 0) {
+        s.gpr.rax.dword = count;
+        win32_stdcall_ret(s, 6);
+        return;
+    }
+    uint32_t n = (uint32_t)cch_dst < count ? (uint32_t)cch_dst : count;
+    for (uint32_t i = 0; i < n; i++) {
+        uint16_t c = mem_read16(src + i * 2);
+        if (flags & 0x00000100 /* LCMAP_LOWERCASE */) {
+            if (c >= 'A' && c <= 'Z') c += 32;
+        } else if (flags & 0x00000200 /* LCMAP_UPPERCASE */) {
+            if (c >= 'a' && c <= 'z') c -= 32;
+        }
+        mem_write16(dst + i * 2, c);
+    }
+    s.gpr.rax.dword = n;
+    win32_stdcall_ret(s, 6);
+}
 STUB2(FileTimeToSystemTime)         // (lpFileTime, lpSystemTime)
 STUB2(FileTimeToLocalFileTime)      // (lpFileTime, lpLocalFileTime)
 STUB6(GetTimeFormatA)               // (locale, flags, time, fmt, buf, cch)
@@ -7562,7 +7777,7 @@ static const ImportEntry kernel32_impls[] = {
     {"SizeofResource", impl_SizeofResource},
     {"ReportFault", impl_ReportFault},
     {"CreateSemaphoreW", impl_CreateSemaphoreA},
-    {"CreateFileW", impl_CreateFileA},
+    {"CreateFileW", impl_CreateFileW},
     {"SetConsoleCtrlHandler", impl_SetErrorMode},
     {"GetStartupInfoW", impl_GetVersionExA},   // both arity 1 — alias is fine
     {"GetStringTypeW", impl_GetStringTypeW},
