@@ -61,7 +61,7 @@ RE_INT = re.compile(r"^-?\d+$")
 # the pc is a lifted entry (win32_runtime.cpp, __remill_error), so it is harvested like a missing block
 # (Steam campaign P961: 0x7ef456 in sub_7ef393).
 RE_CUT = re.compile(r"(store i32 32, ptr %state, align \d+\n(?:  [^\n]*\n)*?  %[\w.]+ = tail call ptr @)__remill_error\(")
-STEAM_CODE_END = {"sps": 0x9ef000, "mps": 0xb09000, "zms": 0xb07000}
+STEAM_CODE_END = {"sps": 0x9ef000, "mps": 0xb09000, "zms": 0xb6a000}
 MAX_VISITS = 200000
 MAX_SET = 64            # a block can start at more addresses than this only by imprecision: stop propagating it
 

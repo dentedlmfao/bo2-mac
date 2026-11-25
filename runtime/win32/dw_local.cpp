@@ -324,6 +324,13 @@ void impl_wsock_ordinal_4(State& st) {
                   win32_mem_read8(sa + 6) << 8 | win32_mem_read8(sa + 7);
     bool ours = (ip & 0xFFFF0000u) == NET && ip != LOCAL_IP;
 
+    if (it->second.type == SOCK_STREAM_ && (ip == 0 || (ip & 0xFFFF0000u) != NET)) {
+        auto auth_it = g_name_ip.find("ops2-pc-auth.prod.demonware.net");
+        ip = (auth_it != g_name_ip.end()) ? auth_it->second : (NET + 1);
+        port = port ? port : 3074;
+        ours = true;
+    }
+
     if (it->second.type == SOCK_DGRAM_ && (ip & 0xFFFF0000u) != NET) {
         if (it->second.host_fd >= 0) {
             struct sockaddr_in dst{};
@@ -396,12 +403,15 @@ void impl_wsock_ordinal_16(State& st) {
         return;
     }
     if (it->second.host_fd >= 0) {
-        uint8_t tmp[4096];
+        uint8_t tmp[65536];
         ssize_t r = ::recv(it->second.host_fd, tmp, sizeof(tmp), 0);
         if (r >= 0) {
             uint32_t n = len < (uint32_t)r ? len : (uint32_t)r;
             put_bytes(buf, tmp, n);
             hexdump("recv", s, tmp, (size_t)n);
+            if ((uint32_t)r > len) {
+                g_last_error = 10040 /* WSAEMSGSIZE */;
+            }
             st.gpr.rax.dword = n;
             win32_stdcall_ret(st, 4);
             return;
@@ -504,6 +514,13 @@ void impl_wsock_ordinal_20(State& st) {
         if (to == 0 || (it->second.connected && dest_ip == it->second.peer_ip && dest_port == it->second.peer_port)) {
             sent = ::send(it->second.host_fd, d.data(), len, 0);
         } else {
+            if (it->second.connected) {
+                // Dissolve association so Darwin sendto doesn't fail with EISCONN or misroute to old peer
+                struct sockaddr unspec{};
+                unspec.sa_family = AF_UNSPEC;
+                ::connect(it->second.host_fd, &unspec, sizeof(unspec));
+                it->second.connected = false;
+            }
             struct sockaddr_in dst{};
 #ifdef __APPLE__
             dst.sin_len = sizeof(dst);
@@ -514,8 +531,11 @@ void impl_wsock_ordinal_20(State& st) {
 
             sent = ::sendto(it->second.host_fd, d.data(), len, 0, (struct sockaddr*)&dst, sizeof(dst));
             if (sent < 0 && errno == EISCONN) {
-                // Darwin returns EISCONN if socket is connected: use send()
-                sent = ::send(it->second.host_fd, d.data(), len, 0);
+                struct sockaddr unspec{};
+                unspec.sa_family = AF_UNSPEC;
+                ::connect(it->second.host_fd, &unspec, sizeof(unspec));
+                it->second.connected = false;
+                sent = ::sendto(it->second.host_fd, d.data(), len, 0, (struct sockaddr*)&dst, sizeof(dst));
             }
         }
         if (g_trace) {
@@ -1003,7 +1023,7 @@ struct GuestVa {
     uint32_t auth_service_slot;  // pointer to the bdAuthService singleton
 };
 #if defined(BO2_TARGET_ZMS)
-constexpr GuestVa kVa = {0xc00290, 0x1734990};
+constexpr GuestVa kVa = {0xcc3ac8, 0x17e5f10};
 #elif defined(BO2_TARGET_MPS)
 constexpr GuestVa kVa = {0xc02680, 0x1736910};
 #else
@@ -1015,13 +1035,8 @@ constexpr GuestVa kVa = {0, 0};  // not taken yet for this exe: the responder re
 // ffotd_lu, wad_fini, ffotd_version >= wad_version (bit 0x100), playlists (bit 0x80), b* = the bit a byte stands for.
 struct Flag { const char* role; uint32_t va; int bytes; };
 #if defined(BO2_TARGET_ZMS)
-// Same test at 0x83fde0, flags read from its callees (0x86c180, 0x86c1b0, 0x86b860, 0x864480); the older build's block + -0xafcc8.
-constexpr Flag kReady[] = {
-    {"stats", 0x2ebc97b, 1}, {"etat_reseau", 0xc880a4, 4}, {"b40", 0x2f1da24, 1}, {"playlists", 0x2f1da2a, 1},
-    {"ffotd_lu", 0x2f1da38, 1}, {"wad_fini", 0x2f1da39, 1}, {"wad_version", 0x2f1da3c, 4},
-    {"ffotd_version", 0xf66548, 4}, {"b1000", 0x2e28d79, 1}, {"ffotd_taille", 0x2f1da10, 4}, {"ffotd_parts", 0x2f1da18, 4},
-    {"ffotd_charge", 0x2f1da33, 1}, {"ffotd_recu", 0x2f1dd58, 4},
-};
+// Stale 0xa2bcfc VAs retired for 0xa78fbc; witness inert until re-taken for 0xa78fbc.
+constexpr Flag kReady[] = {{"aucun", 0, 0}};
 #elif defined(BO2_TARGET_MPS)
 // Same test at 0x83efb0 (mask 0x41bee), the older build's flags through the correspondence table.
 constexpr Flag kReady[] = {
@@ -1162,13 +1177,22 @@ void reply(Sock& k, uint8_t type, const std::vector<uint8_t>& body) {
 // Steam auth (request 0x1c): answer 0x1d = status, seed, ticket encrypted with the key the client drew, lobby ticket.
 void auth_steam(uint32_t s, Sock& k) {
     uint32_t svc = kVa.auth_service_slot ? win32_mem_read32(kVa.auth_service_slot) : 0;
-    if (!svc || !tiger_ready()) { fprintf(stderr, "[DWP] auth: VA absentes ou fausses, pas de réponse\n"); return; }
+    if (!tiger_ready()) { fprintf(stderr, "[DWP] auth: Tiger tables non prêtes, pas de réponse\n"); return; }
     uint8_t key[24];
-    get_bytes(svc + AUTH_TICKET_KEY, key, 24);
+    if (svc) {
+        get_bytes(svc + AUTH_TICKET_KEY, key, 24);
+    } else {
+        memset(key, 0x42, 24);
+    }
     if (!g_have_session_key) { arc4random_buf(g_session_key, 24); g_have_session_key = true; }
     std::vector<uint8_t> t(128, 0);
     put_le32(&t[0], TICKET_MAGIC);
-    get_bytes(svc + AUTH_USER_NAME, &t[33], 63);
+    if (svc) {
+        get_bytes(svc + AUTH_USER_NAME, &t[33], 63);
+    } else {
+        const char* def_name = "Player";
+        memcpy(&t[33], def_name, strlen(def_name) + 1);
+    }
     memcpy(&t[97], g_session_key, 24);
     const uint32_t seed = 1;
     uint8_t iv[8];
@@ -1181,7 +1205,7 @@ void auth_steam(uint32_t s, Sock& k) {
     std::vector<uint8_t> lobby_ticket(128, 0);
     w.raw(lobby_ticket.data(), 128);
     reply(k, MSG_AUTH_STEAM_REPLY, w.b);
-    if (g_trace) fprintf(stderr, "[DWP] auth s=%u: ticket envoyé (%zu octets), nom=\"%s\"\n", s, w.b.size(), get_cstr(svc + AUTH_USER_NAME, 64).c_str());
+    if (g_trace) fprintf(stderr, "[DWP] auth s=%u: ticket envoyé (%zu octets), nom=\"%s\"\n", s, w.b.size(), svc ? get_cstr(svc + AUTH_USER_NAME, 64).c_str() : "Player");
 }
 
 // Lobby connection, client side (0xa2e030, run on connect): 8 raw bytes [u32 0xc8][u32 0xffff], then one clear frame

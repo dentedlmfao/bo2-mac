@@ -49,7 +49,7 @@ constexpr uint32_t texteFin=0x9ef000u;
 #elif defined(BO2_TARGET_MPS)
 constexpr uint32_t texteFin=0xb09000u;
 #else
-constexpr uint32_t texteFin=0xb07000u;
+constexpr uint32_t texteFin=0xb6a000u;   // 0xa78fbc t6zm: .text ..0xb4f980 + .conceal + .interpr ..0xb6962c
 #endif
 
 struct Frame {

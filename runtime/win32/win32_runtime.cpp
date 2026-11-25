@@ -15676,6 +15676,15 @@ extern "C" void bo2_lui_dump_split();
 extern "C" void bo2_uix_dump_split();
 extern "C" void bo2_cfn_diff_arm(uint32_t vk);
 extern "C" int  bo2_lui_names_ready();
+#if defined(BO2_TARGET_ZMS)
+extern "C" void* bo2_sub_427650(State*, uint32_t, void*);
+extern "C" void* bo2_memcpy(State*, uint32_t, void*);
+extern "C" void* bo2_memmove(State*, uint32_t, void*);
+extern "C" void* bo2_memset(State*, uint32_t, void*);
+extern "C" void* bo2_chkstk(State*, uint32_t, void*);
+extern "C" void* bo2_db_auth_validate_header(State*, uint32_t, void*);
+extern "C" void* bo2_sub_4f5360(State*, uint32_t, void*);
+#endif
 
 static void register_extra_lifted() {
 #define BO2_EXTRA_LIFTED(va) register_jump_target(0x##va, sub_##va);
@@ -15816,6 +15825,15 @@ static void register_extra_lifted() {
 #include "extra_lifted_vas_wave52.inc"
 #endif
 #undef BO2_EXTRA_LIFTED
+#if defined(BO2_TARGET_ZMS)
+    register_jump_target(0x427650, (BlockFn)bo2_sub_427650);
+    register_jump_target(0xa6c0a0, bo2_memcpy);
+    register_jump_target(0xa6c890, bo2_memmove);
+    register_jump_target(0xa6c410, bo2_memset);
+    register_jump_target(0xa6c4f0, bo2_chkstk);
+    register_jump_target(0x5459c0, bo2_db_auth_validate_header);
+    register_jump_target(0x4f5360, bo2_sub_4f5360);
+#endif
 }
 
 // Un-liftable callees named by the final link. A synthesized extent can run off
@@ -19171,7 +19189,13 @@ extern "C" void win32_dump_crumbs(int want) {
     // `length + strlen(new) > [desc+4]`. Printing it makes a bad length obvious
     // instead of merely large.
     for (uint32_t i = 0; i < 1; i++) {
+#if defined(BO2_TARGET_ZMS)
+        const uint32_t d   = 0x250f8b4u + i * 12u;
+#elif defined(BO2_TARGET_MPS)
+        const uint32_t d   = 0x24ec44cu + i * 12u;
+#else
         const uint32_t d   = 0x27f9cbcu + i * 12u;
+#endif
         const uint32_t txt = win32_mem_read32(d);
         const uint32_t cap = win32_mem_read32(d + 4);
         const uint32_t len = win32_mem_read32(d + 8);
@@ -20604,6 +20628,16 @@ static void* bo2_remill_call_inner(State& state, uint32_t addr, void* mem) {
         }
     }
     fprintf(stderr, "[shim] function_call: unknown target %#x\n", addr);
+#if defined(BO2_TARGET_ZMS)
+    if (addr == 0) {
+        const uint32_t ret = win32_mem_read32(state.gpr.rsp.dword);
+        if (ret == 0x00a42bf3u || ret == 0x00a42bcbu || ret == 0x00a42c29u) {
+            state.gpr.rax.dword = 0;
+            state.gpr.rsp.dword += 8; // pop ret + 1 arg
+            return mem;
+        }
+    }
+#endif
     // Null function pointer: name the caller — an unregistered callback slot
     // (suspected in the streaming_temp_image wait). Log ret + this + tid.
     if (addr == 0) {
@@ -20802,7 +20836,7 @@ static constexpr uint32_t kAppelTexteFin = 0x9ef000u;
 #elif defined(BO2_TARGET_MPS)
 static constexpr uint32_t kAppelTexteFin = 0xb09000u;
 #else
-static constexpr uint32_t kAppelTexteFin = 0xb07000u;
+static constexpr uint32_t kAppelTexteFin = 0xb6a000u;
 #endif
 extern bool g_bo2_lua_loading;
 static uint32_t bo2_appel_cold = 0xffffffffu;   // 0 voie courte, 1 entree complete, ~0 pas resolu
@@ -22969,7 +23003,11 @@ extern "C" __attribute__((used)) void* bo2_snd_ready(State* s, uint32_t pc, void
 #elif defined(BO2_TARGET_MPS)
     uint32_t queued = win32_mem_read32(0xf57d8cu);
 #else
+#if defined(BO2_TARGET_ZMS)
+    uint32_t queued = win32_mem_read32(0x0100b98cu);
+#else
     uint32_t queued = win32_mem_read32(0xf55e0cu);
+#endif
 #endif
     // HOW FAR AHEAD THE ENGINE IS ALLOWED TO RUN. The original constant is 6
     // buffers = 32 ms, which is a sane figure on Windows where this loop owns a
@@ -24019,6 +24057,95 @@ extern "C" __attribute__((used)) void* bo2_memset(State* s, uint32_t pc, void* m
                 (unsigned long long)calls, n, (unsigned long long)(bytes >> 20));
     s->gpr.rax.dword = dst;        // memset returns dst
     s->gpr.rsp.dword += 4;         // cdecl: pop the return address only
+    return mem;
+}
+
+// Native replacement for CEG-protected DB_AuthLoad_ValidateHeader (0x005459c0) in t6zm.exe.
+// Validates "PHEEBs71", resets g_copyInfoCount (0x12f25bc), seeds the 16000-byte IV table
+// (0x12974f4), stream counters (0x129b374 = {1,1,1,1}), and 32-byte PC Salsa20 key (0x129bcf0).
+extern "C" __attribute__((used)) void* bo2_db_auth_validate_header(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    win32_mem_write32(0x12f25bcu, 0u);
+    const uint32_t esp = s->gpr.rsp.dword;
+    const uint32_t hdr_va = win32_mem_read32(esp + 4);
+    if (!hdr_va) {
+        s->gpr.rax.dword = 0xffffffffu;
+        s->gpr.rsp.dword += 4;
+        return mem;
+    }
+
+    static const char kMagic[8] = {'P', 'H', 'E', 'E', 'B', 's', '7', '1'};
+    for (uint32_t i = 0; i < 8; ++i) {
+        if (static_cast<char>(win32_mem_read8(hdr_va + i)) != kMagic[i]) {
+            s->gpr.rax.dword = 0xffffffffu;
+            s->gpr.rsp.dword += 4;
+            return mem;
+        }
+    }
+
+    char zone_name[32] = {};
+    uint32_t zone_len = 0;
+    while (zone_len < 31) {
+        uint8_t c = win32_mem_read8(hdr_va + 0x0cu + zone_len);
+        if (c == 0) break;
+        zone_name[zone_len++] = static_cast<char>(c);
+    }
+    if (zone_len == 0) {
+        s->gpr.rax.dword = 0xffffffffu;
+        s->gpr.rsp.dword += 4;
+        return mem;
+    }
+
+    uint32_t zoff = 0;
+    for (uint32_t i = 0; i < 16000u; i += 4) {
+        uint8_t ch = static_cast<uint8_t>(zone_name[zoff++]);
+        if (zoff >= zone_len) zoff = 0;
+        win32_mem_write32(0x12974f4u + i, static_cast<uint32_t>(ch) * 0x01010101u);
+    }
+
+    for (uint32_t i = 0; i < 4; ++i) {
+        win32_mem_write32(0x129b374u + i * 4u, 1u);
+    }
+
+    static const uint8_t kSalsa20KeyPC[32] = {
+        0x64, 0x1D, 0x8A, 0x2F, 0xE3, 0x1D, 0x3A, 0xA6,
+        0x36, 0x22, 0xBB, 0xC9, 0xCE, 0x85, 0x87, 0x22,
+        0x9D, 0x42, 0xB0, 0xF8, 0xED, 0x9B, 0x92, 0x41,
+        0x30, 0xBF, 0x88, 0xB6, 0x5E, 0xDC, 0x50, 0xBE
+    };
+    for (uint32_t i = 0; i < 32; i += 4) {
+        uint32_t w = static_cast<uint32_t>(kSalsa20KeyPC[i]) |
+                     (static_cast<uint32_t>(kSalsa20KeyPC[i + 1]) << 8) |
+                     (static_cast<uint32_t>(kSalsa20KeyPC[i + 2]) << 16) |
+                     (static_cast<uint32_t>(kSalsa20KeyPC[i + 3]) << 24);
+        win32_mem_write32(0x129bcf0u + i, w);
+    }
+    win32_mem_write8(0x129bcecu, 1u);
+
+    s->gpr.rax.dword = 0x12cu;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// Native replacement for CEG-protected buffer clear (0x004f5360) called by DB_LoadXFile/0x7fd8ad.
+// Resets g_copyInfoCount (0x12f25bc) and zeroes size bytes at dst_va without running broken XXTEA.
+extern "C" __attribute__((used)) void* bo2_sub_4f5360(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    win32_mem_write32(0x12f25bcu, 0u);
+    const uint32_t esp = s->gpr.rsp.dword;
+    const uint32_t dst_va = win32_mem_read32(esp + 4);
+    const uint32_t size = win32_mem_read32(esp + 8);
+    if (dst_va && size) {
+        uint32_t i = 0;
+        for (; i + 4u <= size; i += 4u) {
+            win32_mem_write32(dst_va + i, 0u);
+        }
+        for (; i < size; ++i) {
+            win32_mem_write8(dst_va + i, 0u);
+        }
+    }
+    s->gpr.rax.dword = dst_va;
+    s->gpr.rsp.dword += 4;
     return mem;
 }
 
@@ -37088,7 +37215,7 @@ extern "C" int g_gsc_noyield = 0;
     }
     // Ses octets d'origine jusqu'a la sortie du cadre. Pas un int3 apres un call
     // noreturn : le releve d'erreur ci-dessous le nomme mieux.
-    if (bo2_interp_peut(addr) && win32_mem_read8(addr) != 0xCCu && win32_mem_read8(addr - 1) != 0xCCu) {
+    if (bo2_interp_peut(addr) && win32_mem_read8(addr) != 0xCCu) {
         bool traduite = false;
         const uint32_t suite = bo2_interp(*state, addr, &mem, "bloc", &traduite);
         if (traduite) {
@@ -37103,7 +37230,7 @@ extern "C" int g_gsc_noyield = 0;
     // noreturn (a longjmp/Com_Error throw that our lift let return). Dump the
     // guest error context: scan the stack for the ASCII error string the engine's
     // Com_Error/LUI reporter built before unwinding — that names the real failure.
-    if (win32_mem_read8(addr) == 0xCCu || win32_mem_read8(addr - 1) == 0xCCu) {
+    if (win32_mem_read8(addr) == 0xCCu) {
         fprintf(stderr, "[MISSING] int3-fallthrough (noreturn returned) — scanning for error text:\n");
         uint32_t esp = state->gpr.rsp.dword;
         auto scan = [&](uint32_t lo, uint32_t hi, const char* tag) {

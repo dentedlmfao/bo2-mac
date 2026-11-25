@@ -43,6 +43,13 @@ extern "C" {
     void win32_mem_write8(uint32_t a, uint8_t v);
     void win32_mem_write16(uint32_t a, uint16_t v);
 }
+#if defined(BO2_TARGET_SPS)
+static constexpr uint32_t kUserTexteFin = 0x9ef000u;
+#elif defined(BO2_TARGET_MPS)
+static constexpr uint32_t kUserTexteFin = 0xb09000u;
+#else
+static constexpr uint32_t kUserTexteFin = 0xb6a000u;
+#endif
 
 // --- fake handle counter (shared with kernel32) ---
 // 🔴 P628/E8 — atomique depuis le 2026-09-21 : c'est un global, incremente
@@ -832,7 +839,7 @@ static void impl_MessageBoxA(State& s) {
         int shown = 0;
         for (uint32_t ad = esp + 0x10; ad < esp + 0x400 && shown < 24; ad += 4) {
             uint32_t rv = win32_mem_read32(ad);
-            if (rv >= 0x401000u && rv < 0xa314b0u) {
+            if (rv >= 0x401000u && rv < kUserTexteFin) {
                 fprintf(stderr, "  [mb-stk %08x] ret=0x%08x args:[%08x %08x %08x %08x]\n",
                         ad, rv, win32_mem_read32(ad+4), win32_mem_read32(ad+8),
                         win32_mem_read32(ad+0xc), win32_mem_read32(ad+0x10));

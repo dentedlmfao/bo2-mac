@@ -23,8 +23,8 @@ extern "C" void* sub_59a120_impl(State*, uint32_t, void*);
 #define FIND_IMPL sub_59a120_impl
 static const char kNom[] = "maps/mp/gametypes/_globallogic.gsc";
 #else
-extern "C" void* sub_59b6c0_impl(State*, uint32_t, void*);
-#define FIND_IMPL sub_59b6c0_impl
+extern "C" void* sub_43f460_impl(State*, uint32_t, void*);
+#define FIND_IMPL sub_43f460_impl
 static const char kNom[] = "maps/mp/gametypes_zm/_globallogic.gsc";
 #endif
 

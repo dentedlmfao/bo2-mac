@@ -53,7 +53,7 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_32
 _TABLES: dict[str, tuple[tuple[int, int], ...]] = {
     "sps": ((0x9ef574, 0x9ef9c4), (0x9ef9c8, 0x9ef9e8)),  # Steam _cinit 0x92017a-0x9201a0, globaux appariés
     "mps": ((0xb095e0, 0xb09ad4), (0xb09ad8, 0xb09af8)),  # Steam _cinit 0xa2b55d (0xa7b58d dans une ancienne t6mp)
-    "zms": ((0xb075e0, 0xb07ad4), (0xb07ad8, 0xb07af8)),  # Steam _cinit 0xa2868d (0xa747ed dans une ancienne t6zm)
+    "zms": ((0xb6a66c, 0xb6ab5c), (0xb6ab60, 0xb6ab80)),  # 0xa78fbc t6zm _cinit 0xa747ed
 }
 DEFAULT_TABLES: tuple[tuple[int, int], ...] = _TABLES[os.environ.get("BO2_TARGET", "sps")]
 SYNTH_CAP = 0x1000                       # max bytes to synthesize for one unlisted function

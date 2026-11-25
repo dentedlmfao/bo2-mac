@@ -44,11 +44,11 @@ extern "C" uint32_t bo2_w32_cold, bo2_w64_cold;
 #define sub_707d50_impl sub_47ba60_impl
 #define sub_708400_impl sub_47c110_impl
 #elif defined(BO2_TARGET_ZMS)
-#define SKIN_VA(sp, zm, mp, ss, zs, ms) zs
-#define sub_707370_impl sub_47acf0_impl
-#define sub_7077d0_impl sub_47b150_impl
-#define sub_707d50_impl sub_47b6d0_impl
-#define sub_708400_impl sub_47bd80_impl
+#define SKIN_VA(sp, zm, mp, ss, zs, ms) zm
+#define sub_707370_impl sub_780a00_impl
+#define sub_7077d0_impl sub_780e60_impl
+#define sub_707d50_impl sub_7813e0_impl
+#define sub_708400_impl sub_781a90_impl
 #else
 #define SKIN_VA(sp, zm, mp, ss, zs, ms) ms
 #define sub_707370_impl sub_47ab10_impl

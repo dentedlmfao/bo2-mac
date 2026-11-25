@@ -593,6 +593,7 @@ static void impl_Sleep(State& s) {
     static DiagCounter<12> s_sc;   // P660/C14 : l'unordered_map bouclait dans un rehash (diag_counter.h)
     uint32_t ret = win32_mem_read32(s.gpr.rsp.dword);
     const uint32_t ms_arg = win32_arg(s, 0);   // lu AVANT win32_stdcall_ret, qui depile
+    const uint32_t ret2 = win32_mem_read32(s.gpr.rsp.dword + 8u);
     if (s_sc.bump(ret) == 0) {
         static std::atomic<bool> dit{false};
         if (!dit.exchange(true)) {
@@ -753,6 +754,17 @@ static void impl_Sleep(State& s) {
         }
     }
     win32_stdcall_ret(s, 1);
+    if (ms_arg == 0 && (ret == 0x00735f9cu || ret == 0x0058d81bu || ret == 0x00457b8bu || ret2 == 0x00735f9cu || ret2 == 0x0058d81bu)) {
+        static uint64_t s_dbwait_cnt = 0;
+        const uint64_t k = ++s_dbwait_cnt;
+        if ((k & (k - 1)) == 0) {
+            fprintf(stderr, "[DBWAIT-SLEEP #%llu] tid=%d ret=0x%08x ret2=0x%08x yielding 1ms\n",
+                    (unsigned long long)k, win32_current_tid(), ret, ret2);
+        }
+        const uint64_t deadline = bo2_mono_ns() + 1000000ull; // 1 ms
+        ordo_attendre_jusqua("DB_WaitXZone", deadline);
+        return;
+    }
     // 🎯 BO2_SLEEP_REAL=1 — Sleep(n) DOIT RENDRE n MILLISECONDES REELLES.
     //
     // Le defaut ci-dessous rend UN tour d'ordonnanceur, quel que soit n. C'est la
@@ -1616,6 +1628,7 @@ static void coop_yield() {
     for (int i = 0; i < n; i++) {
         GThread* t = g_threads[i];
         if (t->status == T_BLOCKED && t->wake_at && g_tick >= t->wake_at) {
+            if (t->wfso_until_ns && bo2_mono_ns() < t->wfso_until_ns) continue;
             t->status = T_RUN; t->wake_at = 0;
         }
     }
@@ -2040,7 +2053,7 @@ static dispatch_semaphore_t ordo_sem() {
 static int ordo_repos_niveau() {
     static const int v = [] {
         const char* e = bo2_getenv("BO2_ORDO_REPOS");
-        const int defaut = 1;
+        const int defaut = 2;
         const int n = e ? atoi(e) : defaut;
         fprintf(stderr, "[ORDO-REPOS] repos du fil ordonnanceur : niveau %d (BO2_ORDO_REPOS : 0 desarme, "
                         "1 Sleep/Present-sync, 2 + WFSO-event, 3 + CS-wait)\n", n);
@@ -2054,12 +2067,13 @@ static void ordo_repos_si_inactif(const GThread* me, uint64_t deadline, const ch
     uint64_t ech = deadline;
     const int n = (int)sched_nthreads();
     const bool cs_attend = ordo_repos_niveau() >= 3;
+    const bool wfso_attend = ordo_repos_niveau() >= 2;
     for (int i = 0; i < n; i++) {
         const GThread* t = g_threads[i];
         if (t == me || t->hosted) continue;
         const int st = __atomic_load_n(&t->status, __ATOMIC_RELAXED);
         const uint64_t w = st == T_RUN ? ((cs_attend && i < 64 && g_cs_waiting_for[i]) ? ~0ull : t->sleep_until_ns)
-                         : (st == T_BLOCKED && t->wake_at) ? t->wfso_until_ns : ~0ull;
+                         : (st == T_BLOCKED && t->wake_at) ? (wfso_attend ? t->wfso_until_ns : ~0ull) : ~0ull;
         if (!w) {   // qui interdit le repos (Z-NATIF-14y) ; fil ordonnanceur seul, donc compteurs simples
             static uint64_t n_refus[32] = {};
             const uint64_t k = i < 32 ? ++n_refus[i] : 0;
@@ -3856,7 +3870,9 @@ static bool host_wanted(uint32_t proc, uint32_t param) {
         }
         return false;
     };
-    if (proc == kJqWorker)                    return has(spec, "jq");
+#if !defined(BO2_TARGET_ZMS)
+    if (proc == kJqWorker)                    return win32_lifted_has(proc) && has(spec, "jq");
+#endif
     if (proc == kThreadMain && param == 0x0du) return has(spec, "snd");
     if (proc == kThreadMain && param == 0x0eu) return has(spec, "snddec");
     if (proc == kThreadMain && param == 0x0fu) return has(spec, "webm");
@@ -4566,9 +4582,9 @@ static void impl_WaitForSingleObject(State& s) {
             }
             if (me->hosted && me->hsem && hosted_self()) host_park_until(me, wfso_deadline_ns, "WFSO-event");  // C25
             else {
-                if (wfso_deadline_ns && !hosted_self() && ordo_repos_niveau() >= 2) {   // P800
+                if (wfso_deadline_ns && !hosted_self()) {
                     me->wfso_until_ns = wfso_deadline_ns;
-                    ordo_repos_si_inactif(me, wfso_deadline_ns, "WFSO-event");
+                    if (ordo_repos_niveau() >= 2) ordo_repos_si_inactif(me, wfso_deadline_ns, "WFSO-event");
                 }
                 coop_yield_until("WFSO-event", wfso_deadline_ns);
                 me->wfso_until_ns = 0;

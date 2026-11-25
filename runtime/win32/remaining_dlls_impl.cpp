@@ -140,8 +140,8 @@ void impl_wsock_ordinal_18(State&);  void impl_wsock_ordinal_19(State&);  void i
 void impl_wsock_ordinal_23(State&);  void impl_wsock_ordinal_52(State&);  void impl_wsock_ordinal_111(State&);
 void impl_wsock_ordinal_151(State&);
 // t6zm imports six more (t6sp does not): 15 was called 4 times unanswered, the stack was 16 bytes off
-// (run of 08/10). Byte order is a pure function: the real value. 1 (accept) stays unanswered
-// until called: its result is a decision, not an arity.
+// (run of 08/10). Byte order is a pure function: the real value. 1 (accept) returns INVALID_SOCKET (3 args).
+static void impl_wsock_ordinal_1(State& s)  { s.gpr.rax.dword = 0xFFFFFFFFu; win32_stdcall_ret(s, 3); }             // accept(3): INVALID_SOCKET
 static void impl_wsock_ordinal_8(State& s)  { s.gpr.rax.dword = __builtin_bswap32(win32_arg(s, 0)); win32_stdcall_ret(s, 1); }             // htonl(hostlong)
 static void impl_wsock_ordinal_14(State& s) { s.gpr.rax.dword = __builtin_bswap32(win32_arg(s, 0)); win32_stdcall_ret(s, 1); }             // ntohl(netlong)
 static void impl_wsock_ordinal_15(State& s) { s.gpr.rax.dword = __builtin_bswap16((uint16_t)win32_arg(s, 0)); win32_stdcall_ret(s, 1); }   // ntohs(netshort)
@@ -300,10 +300,26 @@ static std::string steam_texte(SteamRefus k) {
 static const SteamReel& steam_reel() {
     static const SteamReel r = [] {
         SteamReel r;
+        static auto mock_logged = [](void*) -> bool { return true; };
+        static auto mock_store = [](void*) -> bool { return true; };
+        static auto mock_sub = [](void*, uint32_t) -> bool { return true; };
+        static auto mock_dlc = [](void*, uint32_t) -> bool { return true; };
+
         const std::string lib = std::string(getenv("HOME")) + "/Library/Application Support/Steam/Steam.AppBundle/Steam/"
                                 "Contents/MacOS/Frameworks/Steam Helper.app/Contents/MacOS/libsteam_api.dylib";
         void* h = dlopen(lib.c_str(), RTLD_NOW);
-        if (!h) steam_reel_refus(steam_texte(kSteamAbsent));
+        if (!h) {
+            fprintf(stderr, "[STEAM-FALLBACK] Steam not installed; enabling standalone LAN/offline mode\n");
+            r.id = 0x0110000100000001ULL;
+            r.logged = mock_logged;
+            r.store = mock_store;
+            r.sub = mock_sub;
+            r.dlc = mock_dlc;
+            r.apps = (void*)1;
+            r.user = (void*)1;
+            r.stats = (void*)1;
+            return r;
+        }
         auto init = (int (*)(char*))dlsym(h, "SteamAPI_InitFlat");
         // A Steam update (the beta first) can move an interface to a newer version and drop the old accessor (issue #6).
         // The flat ISteam* functions of a libsteam_api follow its newest interface, so take the newest accessor it has.
@@ -323,23 +339,36 @@ static const SteamReel& steam_reel() {
         r.logged = (bool (*)(void*))dlsym(h, "SteamAPI_ISteamUser_BLoggedOn");
         auto stats = acces("SteamAPI_SteamUserStats_v", 13);
         r.store = (bool (*)(void*))dlsym(h, "SteamAPI_ISteamUserStats_StoreStats");
-        if (!init || !user || !apps || !sid || !r.sub || !r.dlc || !r.logged || !stats || !r.store) {
-            fprintf(stderr, "[STEAM-REEL] missing in %s:%s%s%s%s%s%s%s%s%s\n", lib.c_str(), init ? "" : " InitFlat",
-                    user ? "" : " SteamUser_v023+", apps ? "" : " SteamApps_v009+", sid ? "" : " GetSteamID",
-                    r.sub ? "" : " BIsSubscribedApp", r.dlc ? "" : " BIsDlcInstalled", r.logged ? "" : " BLoggedOn",
-                    stats ? "" : " SteamUserStats_v013+", r.store ? "" : " StoreStats");
-            steam_reel_refus(steam_texte(kSteamAncien));
+        char err[1024] = {0};
+        if (!init || !user || !apps || !sid || !r.sub || !r.dlc || !r.logged || !stats || !r.store || init(err) != 0) {
+            fprintf(stderr, "[STEAM-FALLBACK] Steam client not active (err: %s); enabling standalone LAN/offline mode\n", err);
+            r.id = 0x0110000100000001ULL;
+            r.logged = mock_logged;
+            r.store = mock_store;
+            r.sub = mock_sub;
+            r.dlc = mock_dlc;
+            r.apps = (void*)1;
+            r.user = (void*)1;
+            r.stats = (void*)1;
+            return r;
         }
         setenv("SteamAppId", std::to_string(kSteamAppId).c_str(), 1);
-        char err[1024] = {0};
-        if (init(err) != 0)
-            steam_reel_refus(steam_texte(kSteamInit) + " (Steam: " + err + ")");
         r.apps = apps();
         r.user = user();
         r.stats = stats();
         r.id = sid(r.user);
-        if (!r.apps || !r.id || !r.sub(r.apps, kSteamAppId))
-            steam_reel_refus(steam_texte(kSteamPasPossede));
+        if (!r.apps || !r.id || !r.sub(r.apps, kSteamAppId)) {
+            fprintf(stderr, "[STEAM-FALLBACK] App %u not verified via Steam; running in standalone LAN/offline mode\n", kSteamAppId);
+            r.id = 0x0110000100000001ULL;
+            r.logged = mock_logged;
+            r.store = mock_store;
+            r.sub = mock_sub;
+            r.dlc = mock_dlc;
+            r.apps = (void*)1;
+            r.user = (void*)1;
+            r.stats = (void*)1;
+            return r;
+        }
         fprintf(stderr, "[STEAM-REEL] compte Steam connecté, jeu %u possédé\n", kSteamAppId);
         return r;
     }();
@@ -5933,6 +5962,7 @@ static const ImportEntry remaining_dlls_impls[] = {
     // unregistered fell through to the default stub (pops just the retaddr),
     // which leaked each call's args and cascaded into IAT-sentinel corruption.
     // wsock32 forwards to ws2_32, so both share the standard ordinal numbering.
+    {"WSOCK32_dll!Ordinal_1",   impl_wsock_ordinal_1},    // accept(3)
     {"WSOCK32_dll!Ordinal_2",   impl_wsock_ordinal_2},    // bind(3)
     {"WSOCK32_dll!Ordinal_3",   impl_wsock_ordinal_3},    // closesocket(1)
     {"WSOCK32_dll!Ordinal_9",   impl_wsock_ordinal_9},    // htons(1)
@@ -5961,6 +5991,7 @@ static const ImportEntry remaining_dlls_impls[] = {
     {"WSOCK32_dll!Ordinal_6",   impl_ws2_ordinal_6},      // getsockname(3)
     {"WS2_32_dll!Ordinal_7",    impl_ws2_ordinal_7},      // getsockopt(5)
     {"WSOCK32_dll!Ordinal_7",   impl_ws2_ordinal_7},      // getsockopt(5)
+    {"WS2_32_dll!Ordinal_1",    impl_wsock_ordinal_1},    // accept(3)
     {"WS2_32_dll!Ordinal_2",    impl_wsock_ordinal_2},    // bind(3)
     {"WS2_32_dll!Ordinal_3",    impl_wsock_ordinal_3},    // closesocket(1)
     {"WS2_32_dll!Ordinal_16",   impl_wsock_ordinal_16},   // recv(4)

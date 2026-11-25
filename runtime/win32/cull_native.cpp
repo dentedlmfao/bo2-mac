@@ -33,11 +33,11 @@ extern "C" void* sub_459800_impl(State*, uint32_t, void*);   // P1053 : corps id
 #define CULL_MASQUE 0x2931a20u
 #define CULL_SEUIL 0xb913e0u
 #elif defined(BO2_TARGET_ZMS)
-extern "C" void* sub_4584c0_impl(State*, uint32_t, void*);
-#define CULL_IMPL sub_4584c0_impl
+extern "C" void* sub_75fe50_impl(State*, uint32_t, void*);
+#define CULL_IMPL sub_75fe50_impl
 #define CULL_ENTREE bo2_cull_zm
-#define CULL_MASQUE 0x292faa0u
-#define CULL_SEUIL 0xb8f3a0u
+#define CULL_MASQUE 0x029e0120u
+#define CULL_SEUIL 0x00c786e0u
 #else
 extern "C" void* sub_75fe50_impl(State*, uint32_t, void*);
 #define CULL_IMPL sub_75fe50_impl

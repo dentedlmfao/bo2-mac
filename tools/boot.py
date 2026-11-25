@@ -131,30 +131,73 @@ _TARGETS = {
                            0x59a120: "_bo2_regles_find",
                            0x47ab10: "_bo2_skin1", 0x47af70: "_bo2_skin2", 0x47b4f0: "_bo2_skin3", 0x47bba0: "_bo2_skin4"}),
     "zms": dict(exe="t6zm.exe", path=os.path.expanduser("~/.bo2-native/steam/t6zm.exe.unpacked.exe"),
-                out="bin/ghidra-out-zms", entry=0xa78fbc, eh={}, longjmp=0xa25670,
-                redirects={0xa20e40: "_bo2_memcpy", 0xa1fe70: "_bo2_memset",
-                           0xa21938: "_bo2_libm_atan2", 0x966b40: "_bo2_vpx_decode",
+                out="bin/ghidra-out-zms", entry=0xa78fbc, eh={}, longjmp=0xa71ad0,
+                redirects={0x427650: "_bo2_sub_427650",
+                           0xa6c0a0: "_bo2_memcpy", 0xa6c890: "_bo2_memmove", 0xa6c410: "_bo2_memset",
+                           0xa6c4f0: "_bo2_chkstk",
+                           0xa6de88: "_bo2_libm_atan2", 0x9b1680: "_bo2_vpx_decode",
                            0xa90fe8: "_bo2_controlfp_s", 0xa7c789: "_bo2_fpenv_noop",
+                           # anti-tamper/CEG machine-ID probe (0x5e77d0) spins 0x3ffffffb iters in XXTEA 0x54be80 on macOS
+                           0x42e4c0: "_bo2_fpenv_noop",
+                           0x6680e0: "_bo2_mem_pool_alloc",
+                           0x5459c0: "_bo2_db_auth_validate_header",
+                           0x4f5360: "_bo2_sub_4f5360",
+                           0x534520: "_bo2_sub_534520",
+                           0x551890: "_bo2_sub_551890",
+                           0x54be80: "_bo2_sub_54be80",
                            0xa7a7af: "_bo2_invalid_parameter_noop",
+                           0xa79f42: "_bo2_sub_a79f42",
                            0xa79f5a: "_bo2_strnicmp_l",
-                           0xa70732: "_bo2_crt_unlock_noop", 0xa70809: "_bo2_crt_unlock_noop",
-                           0xa72d3b: "_bo2_crt_unlock_noop", 0xa71908: "_bo2_crt_unlock_noop",
-                           0xa7a826: "_bo2_crt_unlock_noop", 0xa7abd9: "_bo2_crt_unlock_noop", 0xa7abe5: "_bo2_crt_unlock_noop",
-                           0xa86d7d: "_bo2_crt_unlock_noop",
                            0x9ae590: "_bo2_locale_facet_noop",
-                           0x833d40: "_bo2_snd_ready",
-                           0x6f65d0: "_bo2_snd_s16tof", 0x8346d5: "_bo2_snd_addps", 0x834aad: "_bo2_snd_biquad",
-                           0x83c170: "_bo2_snd_reverb_zm",
-                           0x4584c0: "_bo2_cull_zm",
-                           0x59b6c0: "_bo2_regles_find",
-                           0x47acf0: "_bo2_skin1", 0x47b150: "_bo2_skin2", 0x47b6d0: "_bo2_skin3", 0x47bd80: "_bo2_skin4",
-                           # split screen (runtime/win32/split_screen.cpp, inert without BO2_SPLIT)
-                           0x55af10: "_bo2_ss_draw", 0x41c800: "_bo2_ss_send", 0x41bb80: "_bo2_ss_refdef",
-                           0x41bb10: "_bo2_ss_vp", 0x6ec9f0: "_bo2_ss_sv", 0x5d6b30: "_bo2_ss_botcmd",
-                           0x4ad550: "_bo2_ss_hud2", 0x9345b0: "_bo2_ss_lui_update", 0x9315c0: "_bo2_ss_lui_draw",
-                           0x696fe0: "_bo2_ss_lobby", 0x522bf0: "_bo2_ss_third", 0x457970: "_bo2_ss_light",
-                           0x4106f0: "_bo2_ss_add", 0x4dd1b0: "_bo2_ss_prompt", 0x539990: "_bo2_ss_arms",
-                           0x4adaa0: "_bo2_ss_revive", 0x4ca660: "_bo2_ss_hudelems"}),
+                           0x8f0fb0: "_bo2_sub_8f0fb0",
+                           0x8f0ab0: "_bo2_sub_8f0ab0",
+                           0x8f1350: "_bo2_sub_8f1350",
+                           0xa28b30: "_bo2_sub_a28b30",
+                           0xa28b50: "_bo2_sub_a28b50",
+                           0xa28b60: "_bo2_sub_a28b60",
+                           0xa28c60: "_bo2_sub_a28c60",
+                           0xad1ee0: "_bo2_sub_ad1ee0",
+                           0x4999e0: "_bo2_sub_4999e0",
+                           0x4e2470: "_bo2_sub_4e2470",
+                           0x6dfda0: "_bo2_sub_6dfda0",
+                           0xa2aac0: "_bo2_sub_a2aac0",
+                           0xa47020: "_bo2_sub_a47020",
+                           0xa470c0: "_bo2_sub_a470c0",
+                           0xa473b0: "_bo2_sub_a473b0",
+                           0xa474d0: "_bo2_sub_a474d0",
+                           0xa475d0: "_bo2_sub_a475d0",
+                           0x51f3a0: "_bo2_sub_51f3a0",
+                           0x6abf50: "_bo2_sub_6abf50",
+                           0xa29f60: "_bo2_sub_a29f60",
+                           0xa46c70: "_bo2_sub_a46c70",
+                           0xa46d00: "_bo2_sub_a46d00",
+                           0xa46f60: "_bo2_sub_a46f60",
+                           0xa49100: "_bo2_sub_a49100",
+                           0xa4bac0: "_bo2_sub_a4bac0",
+                           0xa4f770: "_bo2_sub_a4f770",
+                           0xa51f80: "_bo2_sub_a51f80",
+                           0xa54c30: "_bo2_sub_a54c30",
+                           0xa588f0: "_bo2_sub_a588f0",
+                           0xa58970: "_bo2_sub_a58970",
+                           0xa589f0: "_bo2_sub_a589f0",
+                           0xa58ff0: "_bo2_sub_a58ff0",
+                           0xad11b0: "_bo2_sub_ad11b0",
+                           0xada3f0: "_bo2_sub_ada3f0",
+                           0xada560: "_bo2_sub_ada560",
+                           0xada570: "_bo2_sub_ada570",
+                           0xa66000: "_bo2_sub_a66000",
+                           0x6776d0: "_bo2_sub_6776d0",
+                           0xada990: "_bo2_sub_ada990",
+                           0xadaa50: "_bo2_sub_adaa50",
+                           0xada670: "_bo2_sub_ada670",
+                           0x63eb10: "_bo2_sub_63eb10",
+                           0x7fd1d0: "_bo2_sub_7fd1d0",
+                           0xa2bc70: "_bo2_sub_a2bc70",
+                           0x539ff0: "_bo2_snd_ready",
+                           0x895a50: "_bo2_snd_s16tof", 0x45ee8c: "_bo2_snd_biquad",
+                           0x75fe50: "_bo2_cull_zm",
+                           0x43f460: "_bo2_regles_find",
+                           0x780a00: "_bo2_skin1", 0x780e60: "_bo2_skin2", 0x7813e0: "_bo2_skin3", 0x781a90: "_bo2_skin4"}),
 }
 if TARGET not in _TARGETS:
     raise SystemExit(f"BO2_TARGET must be one of {sorted(_TARGETS)}, got {TARGET!r}")
@@ -1707,6 +1750,16 @@ def _finish_build(args, workdir, lifted_o, bc_files, start):
             print("   ", (r.stderr or "").strip()[:1500])
             return
         shim_objs.append(ro)
+    if TARGET == "zms":
+        for extra_o in ("bo2_sub_427650.o", "bo2_sub_8f0fb0.o", "bo2_sub_8f0ab0.o", "bo2_sub_8f1350.o", "bo2_sub_a28b30.o", "bo2_sub_a28b50.o", "bo2_sub_a28b60.o", "bo2_sub_a28c60.o", "bo2_sub_ad1ee0.o",
+                        "bo2_sub_4999e0.o", "bo2_sub_4e2470.o", "bo2_sub_6dfda0.o", "bo2_sub_a2aac0.o", "bo2_sub_a47020.o", "bo2_sub_a470c0.o", "bo2_sub_a473b0.o", "bo2_sub_a474d0.o", "bo2_sub_a475d0.o",
+                        "bo2_sub_51f3a0.o", "bo2_sub_6abf50.o", "bo2_sub_a29f60.o", "bo2_sub_a46c70.o", "bo2_sub_a46d00.o", "bo2_sub_a46f60.o", "bo2_sub_a49100.o", "bo2_sub_a4bac0.o",
+                        "bo2_sub_a4f770.o", "bo2_sub_a51f80.o", "bo2_sub_a54c30.o", "bo2_sub_a588f0.o", "bo2_sub_a58970.o", "bo2_sub_a589f0.o", "bo2_sub_a58ff0.o", "bo2_sub_ad11b0.o",
+                        "bo2_sub_ada3f0.o", "bo2_sub_ada560.o", "bo2_sub_ada570.o", "bo2_sub_a66000.o", "bo2_sub_6776d0.o",
+                        "bo2_sub_ada990.o", "bo2_sub_adaa50.o", "bo2_sub_ada670.o", "bo2_sub_ada770.o", "bo2_sub_adb200.o", "bo2_sub_63eb10.o", "bo2_sub_7fd1d0.o", "bo2_sub_a2bc70.o", "bo2_sub_a79f42.o"):
+            extra_p = os.path.join(workdir, extra_o)
+            if os.path.exists(extra_p):
+                shim_objs.append(extra_p)
 
     # Write PE sections to a binary file for the host to load
     print("Writing PE sections to binary file...")
@@ -1791,7 +1844,7 @@ static void dump_guest(const char* why){
     uint32_t sp=g.rsp.dword; int shown=0;
     for(uint32_t a=sp; a<sp+0x400 && shown<24; a+=4){
         uint32_t v=win32_mem_read32(a);
-        if(v>=0x401000 && v<0xa314b0){
+        if(v>=0x401000 && v<0xb6a000){
             fprintf(stderr,"  [stk %08x] ret=%08x args:[%08x %08x %08x %08x]\n",a,v,
                 win32_mem_read32(a+4),win32_mem_read32(a+8),win32_mem_read32(a+0xc),win32_mem_read32(a+0x10));
             shown++;

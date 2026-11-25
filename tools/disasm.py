@@ -79,4 +79,5 @@ def main():
     for i in md.disasm(raw[off:off+n], va):
         print("  0x%08x: %-20s %s %s" % (i.address, i.bytes.hex(), i.mnemonic, i.op_str))
 
-main()
+if __name__ == '__main__':
+    main()
