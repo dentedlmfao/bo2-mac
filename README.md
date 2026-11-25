@@ -38,10 +38,37 @@ Campaign, Zombies and multiplayer against bots, built on your Mac from your own 
 <sub>Campaign (Angola), Zombies (Town) and multiplayer (Hijacked, against bots) on an Apple M1, recorded while playing; the number in the top right corner is frames per second, and the screen recording itself costs some, mostly in the campaign. <a href="https://github.com/adrbn/bo2-mac/raw/main/docs/assets/gameplay.mp4">80-second video (MP4, 20 MB)</a></sub></p>
 
 > [!IMPORTANT]
-> **This repository contains no game file and no translated game code.** It turns your own Steam copy of Black Ops
-> II into an app for your Mac, on your Mac. The game's code ends up inside that app, so nobody can hand you a
+> **This repository contains no game file and no translated game code.** It turns your own copy of Black Ops II
+> into a native ARM64 app for your Mac, on your Mac. The game's code ends up inside that app, so nobody can hand you a
 > ready-made one: each player builds their own, and it may not be shared. Unofficial fan project, not affiliated with
-> Activision, Treyarch or Microsoft. To play, buy the game. Beta: read [what has and has not been proven](docs/PRERELEASE.md).
+> Activision, Treyarch or Microsoft. To play, buy the game. Forked from [adrbn/bo2-mac](https://github.com/adrbn/bo2-mac).
+
+---
+
+## Zombies Multiplayer & Apple Silicon Enhancements
+
+This fork extends **bo2-mac** with **native Darwin POSIX UDP networking** and **Zombies (`t6zm.exe`) multiplayer co-op** support:
+
+- **Real macOS UDP Sockets (`3074`)**: [dw_local.cpp](runtime/win32/dw_local.cpp) and [remaining_dlls_impl.cpp](runtime/win32/remaining_dlls_impl.cpp) bridge Winsock `SOCK_DGRAM` traffic to real Darwin non-blocking UDP sockets alongside the local Demonware `10.77.x.x` responder, with `getsockname`, `getsockopt`, `accept`, and external DNS resolution.
+- **2–4 Player Co-op Match Rules**: Clean-room Zombies GSC scripts ([_globallogic.gsc](runtime/match_rules/zm/maps/mp/gametypes_zm/_globallogic.gsc)) support multi-client lobbies (`maxclients` 4) and player slots `0..3`.
+- **LAN & Tailscale Co-op Tooling**:
+  - [scripts/bo2_connect.sh](scripts/bo2_connect.sh) — auto-detects LAN/Tailscale IPs, probes the host, and injects `connect <IP>:<PORT>` into `/tmp/bo2zms.cmd`.
+  - [tools/zm_probe.py](tools/zm_probe.py) — out-of-band CoD `getchallenge` / `infoResponse` UDP diagnostic probe.
+  - [docs/ZOMBIES_MULTIPLAYER.md](docs/ZOMBIES_MULTIPLAYER.md) — step-by-step hosting & joining guide.
+- **Expanded `t6zm.exe` Compatibility**: Aligned `BO2_TARGET=zms` function catalogues, CRT/TLS/scheduler handling, and FastFile loading shims for native Metal rendering on Apple Silicon.
+
+### Quick Start (Zombies)
+
+```bash
+# 1. Build Remill, HLSLcc, and the Zombies (zms) native binary
+BO2_TARGET=zms bash scripts/build_steam.sh
+
+# 2. Launch Black Ops II Zombies natively
+./scripts/play_steam.sh zm
+
+# 3. (Optional) Join a friend's lobby over LAN or Tailscale
+./scripts/bo2_connect.sh <HOST_IP> 3074
+```
 
 ---
 
@@ -334,7 +361,7 @@ plays when you own it and its files are in your game folder.
 | [tools/remill-patches/](tools/remill-patches/) | the patches carried on top of Remill v6.0.1 |
 | [scripts/](scripts/) | `make_app.sh`, the Steam installer and converter, the launchers |
 | [third_party/HLSLcc](third_party/HLSLcc) | DXBC to Metal shader translation |
-| [docs/](docs/) | the prerelease status, the toolchain |
+| [docs/](docs/) | the prerelease status, the toolchain, [Zombies multiplayer guide](docs/ZOMBIES_MULTIPLAYER.md) |
 
 <img src="docs/assets/rule-10.svg" alt="" width="100%">
 
