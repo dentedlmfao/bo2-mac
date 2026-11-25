@@ -15684,6 +15684,7 @@ extern "C" void* bo2_memset(State*, uint32_t, void*);
 extern "C" void* bo2_chkstk(State*, uint32_t, void*);
 extern "C" void* bo2_db_auth_validate_header(State*, uint32_t, void*);
 extern "C" void* bo2_sub_4f5360(State*, uint32_t, void*);
+extern "C" void* bo2_sub_551890(State*, uint32_t, void*);
 #endif
 
 static void register_extra_lifted() {
@@ -15833,6 +15834,7 @@ static void register_extra_lifted() {
     register_jump_target(0xa6c4f0, bo2_chkstk);
     register_jump_target(0x5459c0, bo2_db_auth_validate_header);
     register_jump_target(0x4f5360, bo2_sub_4f5360);
+    register_jump_target(0x551890, bo2_sub_551890);
 #endif
 }
 
@@ -24145,6 +24147,16 @@ extern "C" __attribute__((used)) void* bo2_sub_4f5360(State* s, uint32_t pc, voi
         }
     }
     s->gpr.rax.dword = dst_va;
+    s->gpr.rsp.dword += 4;
+    return mem;
+}
+
+// Native guard for CEG XXTEA decryptor (0x00551890) in t6zm.exe.
+// When the CEG probe fails, [esi] < 0x14 (typically 0), causing (0 - 0x14) >> 2 = 0x3ffffffb
+// (~1.07B) XXTEA iterations in sub_54be80. Return 0 immediately (cdecl).
+extern "C" __attribute__((used)) void* bo2_sub_551890(State* s, uint32_t pc, void* mem) {
+    (void)pc;
+    s->gpr.rax.dword = 0u;
     s->gpr.rsp.dword += 4;
     return mem;
 }
