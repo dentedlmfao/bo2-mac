@@ -2053,7 +2053,7 @@ static dispatch_semaphore_t ordo_sem() {
 static int ordo_repos_niveau() {
     static const int v = [] {
         const char* e = bo2_getenv("BO2_ORDO_REPOS");
-        const int defaut = 2;
+        const int defaut = 3;
         const int n = e ? atoi(e) : defaut;
         fprintf(stderr, "[ORDO-REPOS] repos du fil ordonnanceur : niveau %d (BO2_ORDO_REPOS : 0 desarme, "
                         "1 Sleep/Present-sync, 2 + WFSO-event, 3 + CS-wait)\n", n);
@@ -3856,7 +3856,7 @@ static constexpr uint32_t kThreadMain = 0x006e95b0u, kJqWorker = 0x008b5b50u;
 // multi / Zombies Steam : images d'une ancienne version de t6mp, 0x890e30 (motif masque unique) et 0xa008c0 (table de correspondance).
 static constexpr uint32_t kThreadMain = 0x006db650u, kJqWorker = 0x009b4aa0u;
 #else
-static constexpr uint32_t kThreadMain = 0x006dc620u, kJqWorker = 0x009b1e10u;
+static constexpr uint32_t kThreadMain = 0x0088fec0u, kJqWorker = 0x009fc950u;
 #endif
 static bool host_wanted(uint32_t proc, uint32_t param) {
     static const char* spec = bo2_getenv("BO2_HOST_THREADS");
