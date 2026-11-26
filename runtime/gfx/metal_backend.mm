@@ -4323,11 +4323,45 @@ extern "C" bool gfx_pump_once() {
                         want.width, want.height);
             }
         }
+        // Check for a fresh frame and skip stale repumps BEFORE acquiring a CAMetalDrawable
+        // or creating a command buffer, so skipped pumps do not drop uncommitted drawables.
+        static RdFrame draws_f;
+        static bool pending_fresh = false;
+        std::vector<RealDrawRec>& draws = draws_f.recs;
+        bool fresh = pending_fresh;
+        { std::lock_guard<std::mutex> lk(g_rd_mu);
+          if (!g_rd_frame.recs.empty()) { draws_f.clear(); draws_f.swap(g_rd_frame); fresh = true;
+                                     g_draws_seq.store(g_rd_frame_seq);
+                                     // BO2_DEPTH_DSV witness: depth now persists across frames, D3D11 never skips one, we do.
+                                     static uint64_t seq_prise = 0;
+                                     if (seq_prise && g_rd_frame_seq > seq_prise + 1)
+                                         g_dd_n[kDdImgPerdues] += g_rd_frame_seq - seq_prise - 1;
+                                     seq_prise = g_rd_frame_seq; } }
+        static const long repump = [] {
+            const char* e = bo2_getenv("BO2_REPUMP_EVERY");
+            return e ? atol(e) : 16L;     // 0 or 1 = old behaviour ; 8 jusqu'au 26/10, 16 depuis P944 (+5 %, 3/3)
+        }();
+        if (!fresh && repump > 1) {
+            static long skip = 0;
+            if (++skip % repump) {
+                static uint64_t nskip = 0;
+                if (++nskip == 1 || (nskip % 20000) == 0)
+                    fprintf(stderr, "[REPUMP] stale frame: skipped %llu re-encodes "
+                                    "(1 in %ld kept) — this time goes back to the guest\n",
+                            (unsigned long long)nskip, repump);
+                return true;    // the pump ran; it simply had nothing new to draw
+            }
+        }
         id<CAMetalDrawable> drawable = [g_layer nextDrawable];
-        if (!drawable) { g_drawables_nil++; return true; }   // transient; try again next pump
+        if (!drawable) { pending_fresh = fresh; g_drawables_nil++; return true; }   // transient; try again next pump
+        pending_fresh = false;
 
         g_frames.fetch_add(1);
-        g_present_fresh = false;      // [PRESENT] : pose a vrai plus bas seulement si l'image est neuve
+        g_present_fresh = fresh;      // [PRESENT] : pose a vrai plus bas seulement si l'image est neuve
+        // BO2_PHOTO_TRACES : la derniere image neuve QUI DESSINE LE MONDE (> 100 tracés) ; les images
+        // d'interface seule (13-26 tracés, menus) s'intercalent et cachaient la chaine du monde.
+        g_photo_rec = fresh && draws.size() > 100;
+        if (g_photo_rec) g_photo_tr.clear();
 
         // 🪤 THIS PASS USED TO CLEAR, AND IT IS ENCODED *AFTER* THE ENGINE'S OWN
         // PASSES — so every frame the engine drew to the drawable was wiped by us,
@@ -4381,53 +4415,6 @@ extern "C" bool gfx_pump_once() {
             // few hundred draws and makes the image stable.
             // C35 : l'image encodee garde son arene jusqu'a l'arrivee de la suivante ;
             // la precedente repart, videe mais avec ses morceaux, vers la construction.
-            static RdFrame draws_f;
-            std::vector<RealDrawRec>& draws = draws_f.recs;
-            bool fresh = false;
-            { std::lock_guard<std::mutex> lk(g_rd_mu);
-              if (!g_rd_frame.recs.empty()) { draws_f.clear(); draws_f.swap(g_rd_frame); fresh = true;
-                                         g_draws_seq.store(g_rd_frame_seq);
-                                         // BO2_DEPTH_DSV witness: depth now persists across frames, D3D11 never skips one, we do.
-                                         static uint64_t seq_prise = 0;
-                                         if (seq_prise && g_rd_frame_seq > seq_prise + 1)
-                                             g_dd_n[kDdImgPerdues] += g_rd_frame_seq - seq_prise - 1;
-                                         seq_prise = g_rd_frame_seq; } }
-            g_present_fresh = fresh;   // [PRESENT] : image NEUVE ou re-encodage de la precedente
-            // BO2_PHOTO_TRACES : la derniere image neuve QUI DESSINE LE MONDE (> 100 tracés) ; les images
-            // d'interface seule (13-26 tracés, menus) s'intercalent et cachaient la chaine du monde.
-            g_photo_rec = fresh && draws.size() > 100;
-            if (g_photo_rec) g_photo_tr.clear();
-            // 🎯 DO NOT RE-ENCODE A STALE FRAME EVERY SINGLE PUMP.
-            //
-            // Measured with `sample` on a stalled angola: the main thread spends
-            // 843 of 1215 samples in win32_run_main_thread, 779 of them inside
-            // gfx_pump_once, and 228 in upload()'s memmove. The guest coroutines
-            // run on THIS SAME THREAD (the scheduler is cooperative ucontext), so
-            // a pump that re-encodes ~1,900 draws at display rate starves them:
-            // the guest never finishes a frame, the frame stays stale, the pump
-            // re-encodes it again. **The starvation sustains itself**, and from
-            // outside it looks exactly like a hang — guestFrames pinned, every
-            // [CADENCE] counter +0, most threads reading RUN.
-            //
-            // Keeping the last frame is still right (an empty list used to clear
-            // and present nothing, which flashed). But it does not have to be done
-            // sixty times a second. Re-encode a stale frame only every Nth pump
-            // and give the rest of the time back to the guest.
-            static const long repump = [] {
-                const char* e = bo2_getenv("BO2_REPUMP_EVERY");
-                return e ? atol(e) : 16L;     // 0 or 1 = old behaviour ; 8 jusqu'au 26/10, 16 depuis P944 (+5 %, 3/3)
-            }();
-            if (!fresh && repump > 1) {
-                static long skip = 0;
-                if (++skip % repump) {
-                    static uint64_t nskip = 0;
-                    if (++nskip == 1 || (nskip % 20000) == 0)
-                        fprintf(stderr, "[REPUMP] stale frame: skipped %llu re-encodes "
-                                        "(1 in %ld kept) — this time goes back to the guest\n",
-                                (unsigned long long)nskip, repump);
-                    return true;    // the pump ran; it simply had nothing new to draw
-                }
-            }
         // P777 : ressources AVANT l'encodage. Ces trois blocs tournaient apres la boucle des dessins :
         // une texture, un shader ou une cible crees pour l'image N n'existaient pas quand N etait
         // encodee (texture noire, dessin saute, cible absente) — un flash noir par ressource neuve, et

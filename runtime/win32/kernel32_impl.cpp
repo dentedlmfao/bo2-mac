@@ -755,6 +755,13 @@ static void impl_Sleep(State& s) {
     }
     win32_stdcall_ret(s, 1);
     if (ms_arg == 0 && (ret == 0x00735f9cu || ret == 0x0058d81bu || ret == 0x00457b8bu || ret2 == 0x00735f9cu || ret2 == 0x0058d81bu)) {
+        if (hosted_self()) {
+            // Hosted threads have no cooperative turn to yield; sleep briefly
+            // instead of touching ordo_attendre_jusqua / ordo_repos_si_inactif.
+            struct timespec ts = { 0, 200000L }; // 200 us
+            nanosleep(&ts, nullptr);
+            return;
+        }
         static uint64_t s_dbwait_cnt = 0;
         const uint64_t k = ++s_dbwait_cnt;
         if ((k & (k - 1)) == 0) {
@@ -3870,9 +3877,7 @@ static bool host_wanted(uint32_t proc, uint32_t param) {
         }
         return false;
     };
-#if !defined(BO2_TARGET_ZMS)
     if (proc == kJqWorker)                    return win32_lifted_has(proc) && has(spec, "jq");
-#endif
     if (proc == kThreadMain && param == 0x0du) return has(spec, "snd");
     if (proc == kThreadMain && param == 0x0eu) return has(spec, "snddec");
     if (proc == kThreadMain && param == 0x0fu) return has(spec, "webm");
