@@ -145,6 +145,8 @@ _TARGETS = {
                            0x534520: "_bo2_sub_534520",
                            0x551890: "_bo2_sub_551890",
                            0x54be80: "_bo2_sub_54be80",
+                           0x41e5c0: "_bo2_ipak_load",
+                           0x776a30: "_bo2_ipak_get",
                            0xa7a7af: "_bo2_invalid_parameter_noop",
                            0xa79f42: "_bo2_sub_a79f42",
                            0xa79f5a: "_bo2_strnicmp_l",

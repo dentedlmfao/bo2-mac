@@ -15685,6 +15685,8 @@ extern "C" void* bo2_chkstk(State*, uint32_t, void*);
 extern "C" void* bo2_db_auth_validate_header(State*, uint32_t, void*);
 extern "C" void* bo2_sub_4f5360(State*, uint32_t, void*);
 extern "C" void* bo2_sub_551890(State*, uint32_t, void*);
+extern "C" void* bo2_ipak_load(State*, uint32_t, void*);
+extern "C" void* bo2_ipak_get(State*, uint32_t, void*);
 #endif
 
 static void register_extra_lifted() {
@@ -15835,6 +15837,8 @@ static void register_extra_lifted() {
     register_jump_target(0x5459c0, bo2_db_auth_validate_header);
     register_jump_target(0x4f5360, bo2_sub_4f5360);
     register_jump_target(0x551890, bo2_sub_551890);
+    register_jump_target(0x41e5c0, bo2_ipak_load);
+    register_jump_target(0x776a30, bo2_ipak_get);
 #endif
 }
 
@@ -23103,6 +23107,10 @@ extern "C" void* sub_6d0c60_impl(State*, uint32_t, void*);
 extern "C" void* sub_6d0bf0_impl(State*, uint32_t, void*);
 extern "C" void* sub_704210_impl(State*, uint32_t, void*);
 extern "C" void* sub_4c41b0_impl(State*, uint32_t, void*);
+#if defined(BO2_TARGET_ZMS)
+extern "C" void* sub_41e5c0_impl(State*, uint32_t, void*);
+extern "C" void* sub_776a30_impl(State*, uint32_t, void*);
+#endif
 extern "C" void* sub_7042f0_impl(State*, uint32_t, void*);
 extern "C" void* sub_70b670_impl(State*, uint32_t, void*);
 extern "C" void* sub_423400_impl(State*, uint32_t, void*);
@@ -26732,7 +26740,7 @@ static const uint32_t kCbufAddText = 0x6d0ee0u;
 #elif defined(BO2_TARGET_MPS)
 static const uint32_t kCbufAddText = 0x6bad90u;
 #else
-static const uint32_t kCbufAddText = 0x6bbe40u;
+static const uint32_t kCbufAddText = 0x006b9d20u;
 #endif
 // t6zm : la file de BO2_CMDPIPE est versee dans le Cbuf du jeu par SA fonction, Cbuf_AddText(localClientNum, text)
 // = 0x6b9d20 (cdecl ; 0x88ce02 : `push "exec default_zm_gamesettings.cfg\n" ; push 0 ; call`), une ligne par appel,
@@ -29916,7 +29924,11 @@ extern "C" __attribute__((used)) void* bo2_ipak_load(State* s, uint32_t pc, void
     if (pname) while (k < 79) { uint8_t c = win32_mem_read8(pname + (uint32_t)k);
                                 if (c < 0x20 || c > 0x7e) break; nm[k++] = (char)c; }
     nm[k] = 0;
+#if defined(BO2_TARGET_ZMS)
+    void* r = sub_41e5c0_impl(s, pc, mem);
+#else
     void* r = sub_4c41b0_impl(s, pc, mem);
+#endif
     int32_t rv = (int32_t)s->gpr.rax.dword;
     if (rv == 0 && nm[0]) g_ipak_order.push_back(nm);   // slot index == load order
     static const char* why[] = { "?", "open failed", "short header read",
@@ -29936,7 +29948,11 @@ extern "C" __attribute__((used)) void* bo2_ipak_load(State* s, uint32_t pc, void
 // BO2_IMG_GATE=1.
 extern "C" __attribute__((used)) void* bo2_ipak_get(State* s, uint32_t pc, void* mem) {
     static const int probe = bo2_getenv("BO2_IMG_GATE") ? 1 : 0;
+#if defined(BO2_TARGET_ZMS)
+    uint32_t rec = s->gpr.rsi.dword;
+#else
     uint32_t rec = s->gpr.rax.dword;
+#endif
     char nm[64]; nm[0] = 0;
     if (rec) {
         uint32_t np = win32_mem_read32(rec + 0x48);
@@ -29970,8 +29986,15 @@ extern "C" __attribute__((used)) void* bo2_ipak_get(State* s, uint32_t pc, void*
             // Guessing here writes a descriptor pointing into the wrong file.
             uint32_t slot = it->second.slot;
             const std::string& want = g_ipak_order[it->second.slot];
+#if defined(BO2_TARGET_ZMS)
+            static const uint32_t kPakSlotsBase = 0x031dbb88u;
+            static const uint32_t kPakSlotsStride = 0x6cu;
+#else
+            static const uint32_t kPakSlotsBase = 0x3124a90u;
+            static const uint32_t kPakSlotsStride = 0x68u;
+#endif
             for (uint32_t q = 0; q < 16; q++) {
-                uint32_t rq = 0x3124a90u + q * 0x68u;
+                uint32_t rq = kPakSlotsBase + q * kPakSlotsStride;
                 if (!win32_mem_read32(rq + 0x64)) continue;
                 char sn[64]; int k = 0;
                 while (k < 63) { uint8_t c = win32_mem_read8(rq + (uint32_t)k);
@@ -29994,7 +30017,11 @@ extern "C" __attribute__((used)) void* bo2_ipak_get(State* s, uint32_t pc, void*
                     nm, (unsigned long long)key);
         }
     }
+#if defined(BO2_TARGET_ZMS)
+    void* r = sub_776a30_impl(s, pc, mem);
+#else
     void* r = sub_704210_impl(s, pc, mem);
+#endif
     if (probe) {
         static uint32_t n = 0, ok = 0;
         n++;
