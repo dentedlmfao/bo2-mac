@@ -7600,6 +7600,18 @@ static void impl_MultiByteToWideChar(State& s) {
 STUB4(GetStringTypeW)           // (dwInfoType, lpSrcStr, cchSrc, lpCharType)
 STUB1(SetHandleCount)           // (uNumber) — was unregistered (default popped 0)
 
+static void impl_OpenFileById(State& s) {
+    s.gpr.rax.dword = 0xFFFFFFFFu; // INVALID_HANDLE_VALUE
+    t_last_error = 120; // ERROR_CALL_NOT_IMPLEMENTED
+    win32_stdcall_ret(s, 6);
+}
+
+static void impl_GetFileInformationByHandleEx(State& s) {
+    s.gpr.rax.dword = 0u; // FALSE
+    t_last_error = 120; // ERROR_CALL_NOT_IMPLEMENTED
+    win32_stdcall_ret(s, 4);
+}
+
 // --- PSAPI (not KERNEL32 but dispatched by name) ---
 // GetProcessMemoryInfo(handle, @counters, cb) — stdcall 3 args
 // Uses a global for test-injected working set size. In production this
@@ -7711,6 +7723,8 @@ static const ImportEntry kernel32_impls[] = {
     {"GetModuleFileNameA", impl_GetModuleFileNameA},
     {"GetModuleFileNameW", impl_GetModuleFileNameW},
     {"GetModuleHandleExA", impl_GetModuleHandleExA},
+    {"OpenFileById", impl_OpenFileById},
+    {"GetFileInformationByHandleEx", impl_GetFileInformationByHandleEx},
     {"FormatMessageA", impl_FormatMessageA},
     {"GetEnvironmentStringsW", impl_GetEnvironmentStringsW},
     {"FreeEnvironmentStringsW", impl_FreeEnvironmentStringsW},

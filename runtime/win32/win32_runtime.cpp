@@ -15999,6 +15999,8 @@ extern "C" uint32_t win32_send_message(State* s, uint32_t hwnd, uint32_t msg,
                                        uint32_t wp, uint32_t lp) {
     if (!g_guest_wndproc || !s) return 0;
     uint32_t save_esp = s->gpr.rsp.dword, save_eax = s->gpr.rax.dword;
+    uint32_t save_ebx = s->gpr.rbx.dword, save_esi = s->gpr.rsi.dword;
+    uint32_t save_edi = s->gpr.rdi.dword, save_ebp = s->gpr.rbp.dword;
     uint32_t sp = save_esp;
     sp -= 4; win32_mem_write32(sp, lp);
     sp -= 4; win32_mem_write32(sp, wp);
@@ -16010,6 +16012,10 @@ extern "C" uint32_t win32_send_message(State* s, uint32_t hwnd, uint32_t msg,
     uint32_t r = ok ? s->gpr.rax.dword : 0;
     s->gpr.rsp.dword = save_esp;
     s->gpr.rax.dword = save_eax;
+    s->gpr.rbx.dword = save_ebx;
+    s->gpr.rsi.dword = save_esi;
+    s->gpr.rdi.dword = save_edi;
+    s->gpr.rbp.dword = save_ebp;
     // Split the call-target differential ON THE KEY ITSELF. Correlating "before"
     // and "after" by wall clock is exactly what produced two wrong readings of
     // the zone log; an in-band marker cannot drift.
