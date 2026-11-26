@@ -740,6 +740,20 @@ static void impl_ShowCursor(State& s) {
     // ShowCursor(show) — returns counter, stdcall 1 arg. Under Windows the pointer shows while the counter
     // is >= 0. Not honoured yet: the count flips between 0 and -1 at frame rate in the menus, which no
     // Windows player sees as a blinking pointer, so something upstream of this call differs. Witness only.
+#if defined(BO2_TARGET_ZMS)
+    // Cap com_maxfps (0x025b6128, default 0 = uncapped -> minMsec=1ms) to 60 so Com_Frame sleeps
+    // in 0x88bd3d instead of spinning tid 0 at ~560 Hz and starving the render backend.
+    if (uint32_t dvar = win32_mem_read32(0x025b6128u)) {
+        if (win32_mem_read32(dvar + 0x10u) == 6u && win32_mem_read32(dvar + 0x18u) == 0u) {
+            win32_mem_write32(dvar + 0x18u, 60u);
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                fprintf(stderr, "[ZMS-FPS] com_maxfps (0x%08x) 0 -> 60\n", dvar);
+            }
+        }
+    }
+#endif
     static int cursor_count = 0;
     int show = (int)win32_arg(s, 0);
     const int avant = cursor_count;

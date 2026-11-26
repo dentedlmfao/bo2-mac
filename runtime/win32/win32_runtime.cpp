@@ -16822,6 +16822,8 @@ static void win32_dispatch_import_corps(State& state, uint32_t iat_va) {
     // window and print the top offenders: a spin shows the same few call sites
     // dominating window after window, progress shows the mix shifting.
     if (g_import_profile_window > 0) {
+        static std::mutex s_prof_mu;
+        std::lock_guard<std::mutex> lk(s_prof_mu);
         static std::unordered_map<uint64_t, uint32_t> s_hist;
         static uint32_t s_tid_hist[16] = {0};
         static int s_next = g_import_profile_window;

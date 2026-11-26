@@ -684,7 +684,7 @@ void impl_wsock_ordinal_17(State& st) {
 
 // select(nfds, readfds, writefds, exceptfds, timeout): polls state of synthetic and host sockets.
 void impl_wsock_ordinal_18(State& st) {
-    std::lock_guard<std::mutex> l(g_mu);
+    std::unique_lock<std::mutex> l(g_mu);
     uint32_t rd = win32_arg(st, 1), wr = win32_arg(st, 2), ex = win32_arg(st, 3);
     uint32_t timeout_ptr = win32_arg(st, 4);
 
@@ -750,6 +750,9 @@ void impl_wsock_ordinal_18(State& st) {
             pfd_map.push_back({s, POLLOUT});
         }
     }
+
+    // Release g_mu before ::poll so bo2_ordonnanceur (tid 0) is never stalled by socket polling.
+    l.unlock();
 
     if (!pfds.empty()) {
         int poll_rc = ::poll(pfds.data(), (nfds_t)pfds.size(), timeout_ms);
